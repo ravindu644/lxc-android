@@ -82,7 +82,8 @@ _execute_in_ns() {
 
 run_in_chroot() {
     local command="$*"
-    _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$command"
+    local path_export="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'"
+    _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$path_export; $command"
 }
 
 create_namespace() {
@@ -157,6 +158,10 @@ apply_internet_fix() {
     run_in_chroot "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts"
     run_in_chroot "echo -e '$dns_servers' > /etc/resolv.conf"
 
+    # 1.5. Disable IPv6 completely
+    run_in_chroot "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true"
+    run_in_chroot "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || true"
+
     # 2. Android GIDs (Permissions)
     # Using busybox syntax or raw file append to be distro-agnostic
     run_in_chroot "grep -q '^aid_inet:' /etc/group || echo 'aid_inet:x:3003:root' >> /etc/group"
@@ -183,9 +188,6 @@ start_chroot() {
 
     # 2. Prepare Mounts
     rm -f "$MOUNTED_FILE"
-    
-    # Make root rprivate to prevent mount leakage
-    run_in_chroot mount --make-rprivate /
 
     # Standard Linux Mounts
     advanced_mount "proc" "$CHROOT_PATH/proc" "proc" "-o rw,nosuid,nodev,noexec,relatime"
@@ -194,7 +196,7 @@ start_chroot() {
     # Dev Mounts
     if grep -q devtmpfs /proc/filesystems; then
         advanced_mount "devtmpfs" "$CHROOT_PATH/dev" "devtmpfs" "-o mode=755"
-        run_in_chroot "umount /dev/fd && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
+        run_in_chroot "umount /dev/fd 2>/dev/null || true && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
     else
         advanced_mount "/dev" "$CHROOT_PATH/dev" "bind"
     fi
@@ -203,6 +205,9 @@ start_chroot() {
     advanced_mount "tmpfs" "$CHROOT_PATH/tmp" "tmpfs" "-o rw,nosuid,nodev,relatime,size=256M"
     advanced_mount "tmpfs" "$CHROOT_PATH/run" "tmpfs" "-o rw,nosuid,nodev,relatime,size=64M"
     advanced_mount "tmpfs" "$CHROOT_PATH/dev/shm" "tmpfs" "-o mode=1777"
+
+    # Make root rprivate to prevent mount leakage
+    _execute_in_ns busybox mount --make-rprivate "$CHROOT_PATH" "$CHROOT_PATH" 2>/dev/null || true
 
     # 3. Optimizations & Fixes
     apply_internet_fix
@@ -255,7 +260,8 @@ enter_chroot() {
     log "Entering shell as $user..."
     
     # Alpine typically uses /bin/sh (ash). bash might not be installed.
-    local shell_cmd="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'; export TERM=xterm-256color; exec /bin/su - $user"
+    local common_exports="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'; export TERM=xterm-256color"
+    local shell_cmd="$common_exports; exec /bin/su - $user"
     
     _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$shell_cmd"
 }

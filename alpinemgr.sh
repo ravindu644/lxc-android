@@ -193,7 +193,43 @@ start_chroot() {
     # Standard Linux Mounts
     advanced_mount "proc" "$CHROOT_PATH/proc" "proc" "-o rw,nosuid,nodev,noexec,relatime"
     advanced_mount "sysfs" "$CHROOT_PATH/sys" "sysfs" "-o rw,nosuid,nodev,noexec,relatime"
-    
+
+    # Essential for LXC functionality
+    log "Setting up minimal cgroups for Docker..."
+
+    _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup"
+
+    if _execute_in_ns mount -t tmpfs -o mode=755,rw,nosuid,nodev,noexec,relatime tmpfs "$CHROOT_PATH/sys/fs/cgroup" 2>/dev/null; then
+        echo "$CHROOT_PATH/sys/fs/cgroup" >> "$MOUNTED_FILE"
+
+        # Mount 'devices' cgroup (Critical for LXC)
+        _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup/devices"
+        if grep -q devices /proc/cgroups 2>/dev/null; then
+            if _execute_in_ns mount -t cgroup -o devices cgroup "$CHROOT_PATH/sys/fs/cgroup/devices" 2>/dev/null; then
+                log "Cgroup devices mounted successfully."
+                echo "$CHROOT_PATH/sys/fs/cgroup/devices" >> "$MOUNTED_FILE"
+            else
+                warn "Failed to mount cgroup devices."
+            fi
+        else
+            warn "Devices cgroup controller not available."
+        fi
+
+        # Mount other common controllers if available
+        for subsys in cpu memory freezer cpuset; do
+            if grep -q "$subsys" /proc/cgroups 2>/dev/null; then
+                _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup/$subsys"
+                if _execute_in_ns mount -t cgroup -o "$subsys" cgroup "$CHROOT_PATH/sys/fs/cgroup/$subsys" 2>/dev/null; then
+                    echo "$CHROOT_PATH/sys/fs/cgroup/$subsys" >> "$MOUNTED_FILE"
+                else
+                    warn "Failed to mount cgroup $subsys."
+                fi
+            fi
+        done
+    else
+        warn "Failed to mount cgroup tmpfs."
+    fi
+
     # Dev Mounts
     if grep -q devtmpfs /proc/filesystems; then
         advanced_mount "devtmpfs" "$CHROOT_PATH/dev" "devtmpfs" "-o mode=755"

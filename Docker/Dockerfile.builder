@@ -18,6 +18,9 @@ RUN mkdir -p /etc/lxc && \
     cat > /etc/lxc/default.conf << 'EOF'
 lxc.net.0.type = none
 lxc.namespace.share.net = /proc/1/ns/net
+lxc.cgroup.devices.allow = c 10:200 rwm
+lxc.mount.entry = /dev/net dev/net none bind,create=dir 0 0
+lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file
 EOF
 
 # Stage 2: Export to scratch for extraction

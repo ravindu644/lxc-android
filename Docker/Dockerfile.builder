@@ -9,7 +9,8 @@ RUN apk update && \
     lxc \
     lxc-templates \
     lxc-download \
-    gzip && \
+    gzip \
+    iptables-legacy && \
     rm -rf /var/cache/apk/*
 
 # Configure LXC default settings

@@ -176,9 +176,10 @@ apply_internet_fix() {
     run_in_chroot hostname "$C_HOSTNAME"
     run_in_chroot "echo -e '$dns_servers' > /etc/resolv.conf"
 
-    # 1.5. Disable IPv6 completely
+    # 1.5. Disable IPv6 completely and enable IPv4 forwarding
     run_in_chroot "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true"
     run_in_chroot "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || true"
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
 
     # 2. Android GIDs (Permissions)
     # Using busybox syntax or raw file append to be distro-agnostic
@@ -187,6 +188,12 @@ apply_internet_fix() {
 
     # 3. Fix root groups if usermod exists, otherwise we rely on manual /etc/group editing above
     run_in_chroot "command -v usermod >/dev/null && usermod -a -G aid_inet,aid_net_raw root 2>/dev/null || true"
+
+    # 4. Flush filter chains and forward all the LXC traffic to localhost
+    run_in_ns iptables -t filter -F
+    run_in_ns ip6tables -t filter -F
+    run_in_ns iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 -m tcp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
+    run_in_ns iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 -m udp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
 }
 
 start_chroot() {
@@ -268,7 +275,7 @@ start_chroot() {
     advanced_mount "sysfs" "$CHROOT_PATH/sys" "sysfs" "-o rw,nosuid,nodev,noexec,relatime"
 
     # Essential for LXC functionality
-    log "Setting up minimal cgroups for Docker..."
+    log "Setting up cgroups for LXC..."
 
     _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup"
 

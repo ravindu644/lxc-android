@@ -303,7 +303,12 @@ start_chroot() {
     else
         advanced_mount "/dev" "$CHROOT_PATH/dev" "bind"
     fi
-    
+
+    # Mount binfmt_misc if supported
+    if grep -q binfmt_misc /proc/filesystems; then
+        advanced_mount "binfmt_misc" "$CHROOT_PATH/proc/sys/fs/binfmt_misc" "binfmt_misc" ""
+    fi
+
     advanced_mount "devpts" "$CHROOT_PATH/dev/pts" "devpts" "-o rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000"
     advanced_mount "tmpfs" "$CHROOT_PATH/tmp" "tmpfs" "-o rw,nosuid,nodev,relatime,size=256M"
     advanced_mount "tmpfs" "$CHROOT_PATH/run" "tmpfs" "-o rw,nosuid,nodev,relatime,size=64M"

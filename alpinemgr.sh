@@ -81,6 +81,17 @@ _execute_in_ns() {
     fi
 }
 
+run_in_ns() {
+    # Wrapper to execute a command in the namespace but not yet in the chroot.
+    # Falls back to direct execution if namespace not available.
+    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+        _execute_in_ns "$@"
+    else
+        # If no namespace holder is running, execute command directly.
+        "$@"
+    fi
+}
+
 run_in_chroot() {
     local command="$*"
     local path_export="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'"
@@ -295,6 +306,23 @@ start_chroot() {
     log "Chroot started successfully."
 }
 
+umount_chroot() {
+    log "Unmounting chroot filesystems..."
+
+    # Unmount mounts recorded in file
+    if [ -f "$MOUNTED_FILE" ]; then
+        # Unmount in reverse order (deepest first)
+        sort -r "$MOUNTED_FILE" | while read -r mount_point; do
+            case "$mount_point" in
+                "$CHROOT_PATH"/sys*) run_in_ns umount -l "$mount_point" 2>/dev/null ;;
+                *) run_in_ns umount "$mount_point" 2>/dev/null ;;
+            esac
+        done
+        rm -f "$MOUNTED_FILE"
+        log "All chroot mounts unmounted."
+    fi
+}
+
 stop_chroot() {
     log "Stopping chroot..."
     
@@ -302,14 +330,8 @@ stop_chroot() {
     local pids=$(lsof 2>/dev/null | grep "$CHROOT_PATH" | awk '{print $2}' | uniq)
     [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 
-    # Unmount mounts recorded in file
-    if [ -f "$MOUNTED_FILE" ]; then
-        # Unmount in reverse order
-        tac "$MOUNTED_FILE" | while read -r mnt; do
-            _execute_in_ns umount -l "$mnt" 2>/dev/null
-        done
-        rm -f "$MOUNTED_FILE"
-    fi
+    # Unmount filesystems (BEFORE killing namespace holder)
+    umount_chroot
 
     # Unmount sparse image if it exists
     if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$CHROOT_PATH" 2>/dev/null; then

@@ -532,9 +532,24 @@ uninstall_chroot() {
 case "$1" in
     start)
         start_chroot
+        # Auto-enter shell if running in interactive terminal
+        if [ -t 1 ]; then
+            enter_chroot "${2:-root}"
+        fi
         ;;
     stop)
         stop_chroot
+        ;;
+    restart)
+        log "Restarting chroot..."
+        stop_chroot
+        sleep 1
+        sync
+        start_chroot
+        # Auto-enter shell if running in interactive terminal
+        if [ -t 1 ]; then
+            enter_chroot "${2:-root}"
+        fi
         ;;
     status)
         if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
@@ -561,7 +576,7 @@ case "$1" in
         uninstall_chroot
         ;;
     *)
-        echo "Usage: $SCRIPT_NAME {start|stop|status|enter|run <cmd>|backup <file>|restore <file>|uninstall}"
+        echo "Usage: $SCRIPT_NAME {start|stop|restart|status|enter [user]|run <cmd>|backup <file>|restore <file>|uninstall}"
         exit 1
         ;;
 esac

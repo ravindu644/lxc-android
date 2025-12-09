@@ -6,6 +6,7 @@
 # --- Configuration ---
 BASE_CHROOT_DIR="/data/local/alpine-chroot"
 CHROOT_PATH="${BASE_CHROOT_DIR}/rootfs"
+ROOTFS_IMG="${BASE_CHROOT_DIR}/rootfs.img"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(dirname "$0")"
 C_HOSTNAME="alpine"
@@ -178,8 +179,6 @@ start_chroot() {
         return
     fi
 
-    [ ! -d "$CHROOT_PATH" ] && { error "Directory $CHROOT_PATH not found"; exit 1; }
-
     log "Starting Alpine Chroot..."
     setenforce 0 2>/dev/null
 
@@ -187,8 +186,66 @@ start_chroot() {
     create_namespace "$HOLDER_PID_FILE" || exit 1
     log "Namespace created (PID: $(cat "$HOLDER_PID_FILE"))"
 
+    # 1.5. Handle sparse image if it exists
+    if [ -f "$ROOTFS_IMG" ]; then
+        log "Sparse image detected"
+
+        if mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
+            log "Sparse image already mounted, unmounting first..."
+            if umount -f "$CHROOT_PATH" 2>/dev/null || umount -l "$CHROOT_PATH" 2>/dev/null; then
+                log "Previous mount cleaned up"
+            else
+                warn "Failed to unmount previous mount, continuing anyway"
+            fi
+        fi
+
+        # Enable journal if missing
+        if ! tune2fs -l "$ROOTFS_IMG" 2>/dev/null | grep -q "has_journal"; then
+            log "Sparse image does not have journal - Enabling..."
+            tune2fs -O has_journal "$ROOTFS_IMG" 2>/dev/null || warn "Failed to enable journal"
+            tune2fs -o journal_data_writeback "$ROOTFS_IMG" 2>/dev/null || warn "Failed to set journal mode"
+        fi
+
+        # Check and repair filesystem before mounting
+        log "Checking filesystem integrity..."
+        local fsck_output=$(e2fsck -f -y "$ROOTFS_IMG" 2>&1)
+        local fsck_exit=$?
+
+        # Exit codes: 0=no errors, 1=corrected, 2=corrected/reboot, 4+=failed
+        if [ $fsck_exit -ge 4 ]; then
+            error "Filesystem check failed (exit: $fsck_exit)"
+            error "Output: $fsck_output"
+            error "Filesystem corruption detected - cannot safely mount"
+            exit 1
+        elif [ $fsck_exit -ne 0 ]; then
+            log "Filesystem check corrected issues (exit: $fsck_exit)"
+        else
+            log "Filesystem integrity verified"
+        fi
+
+        sleep 1
+
+        log "Mounting sparse image to rootfs..."
+        if ! _execute_in_ns mount -t ext4 -o loop,rw,noatime,nodiratime,errors=remount-ro "$ROOTFS_IMG" "$CHROOT_PATH"; then
+            error "Failed to mount sparse image"
+            exit 1
+        else
+            log "Sparse image mounted successfully"
+        fi
+    else
+        # Directory-based chroot - check if directory exists
+        [ ! -d "$CHROOT_PATH" ] && { error "Directory $CHROOT_PATH not found"; exit 1; }
+    fi
+
     # 2. Prepare Mounts
     rm -f "$MOUNTED_FILE"
+
+    # Set mount propagation to rprivate
+    if _execute_in_ns busybox mount --make-rprivate / 2>/dev/null; then
+        log "Set entire namespace to recursive private propagation"
+    else
+        warn "Failed to set root to rprivate propagation"
+    fi
 
     # Standard Linux Mounts
     advanced_mount "proc" "$CHROOT_PATH/proc" "proc" "-o rw,nosuid,nodev,noexec,relatime"
@@ -231,9 +288,6 @@ start_chroot() {
     advanced_mount "tmpfs" "$CHROOT_PATH/run" "tmpfs" "-o rw,nosuid,nodev,relatime,size=64M"
     advanced_mount "tmpfs" "$CHROOT_PATH/dev/shm" "tmpfs" "-o mode=1777"
 
-    # Make root rprivate to prevent mount leakage
-    _execute_in_ns busybox mount --make-rprivate "$CHROOT_PATH" "$CHROOT_PATH" 2>/dev/null || true
-
     # 3. Optimizations & Fixes
     apply_internet_fix
     android_optimizations --enable
@@ -255,6 +309,16 @@ stop_chroot() {
             _execute_in_ns umount -l "$mnt" 2>/dev/null
         done
         rm -f "$MOUNTED_FILE"
+    fi
+
+    # Unmount sparse image if it exists
+    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
+        log "Unmounting sparse image..."
+        if umount -f "$CHROOT_PATH" 2>/dev/null || umount -l "$CHROOT_PATH" 2>/dev/null; then
+            log "Sparse image unmounted successfully."
+        else
+            warn "Failed to unmount sparse image."
+        fi
     fi
 
     # Kill Namespace Holder
@@ -296,15 +360,70 @@ backup_chroot() {
     [ -z "$backup_file" ] && { error "Usage: backup <path.tar.gz>"; exit 1; }
     
     log "Backing up to $backup_file..."
-    stop_chroot
     
+    # Stop chroot if running
+    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+        stop_chroot
+    fi
+
+    sync && sleep 1
+
     local backup_dir=$(dirname "$backup_file")
     mkdir -p "$backup_dir"
     
-    if busybox tar -czf "$backup_file" -C "$CHROOT_PATH" .; then
-        log "Backup complete."
+    local tar_exit_code=1
+
+    if [ -f "$ROOTFS_IMG" ]; then
+        # Sparse image backup method
+        log "Using sparse image backup method."
+
+        local temp_mount_point="${CHROOT_PATH}_bkmnt"
+        mkdir -p "$temp_mount_point"
+
+        # Check and repair filesystem before mounting
+        log "Checking filesystem integrity before backup..."
+        local fsck_output=$(e2fsck -f -y "$ROOTFS_IMG" 2>&1)
+        local fsck_exit=$?
+
+        if [ $fsck_exit -ge 4 ]; then
+            error "Filesystem check failed (exit: $fsck_exit)"
+            error "Output: $fsck_output"
+            error "Filesystem corruption detected - cannot safely backup"
+            rmdir "$temp_mount_point" >/dev/null 2>&1
+            exit 1
+        fi
+
+        [ $fsck_exit -ne 0 ] && log "Filesystem check corrected issues (exit: $fsck_exit)"
+        sleep 1
+
+        # Mount the image read-only for safety
+        if mount -t ext4 -o loop,ro "$ROOTFS_IMG" "$temp_mount_point"; then
+            log "Sparse image mounted cleanly for backup."
+
+            if busybox tar -czf "$backup_file" -C "$temp_mount_point" .; then
+                tar_exit_code=0
+            fi
+
+            sync
+            umount "$temp_mount_point"
+            rmdir "$temp_mount_point"
+        else
+            error "Failed to create a clean mount of the sparse image for backup."
+            rmdir "$temp_mount_point" >/dev/null 2>&1
+        fi
     else
-        error "Backup failed."
+        # Directory backup method
+        log "Using directory backup method."
+        if busybox tar -czf "$backup_file" -C "$CHROOT_PATH" .; then
+            tar_exit_code=0
+        fi
+    fi
+
+    if [ "$tar_exit_code" -eq 0 ]; then
+        local size=$(du -h "$backup_file" 2>/dev/null | cut -f1)
+        log "Backup complete: $backup_file (${size:-unknown size})"
+    else
+        error "Backup failed. Removing incomplete file."
         rm -f "$backup_file"
         exit 1
     fi
@@ -315,9 +434,33 @@ restore_chroot() {
     [ ! -f "$backup_file" ] && { error "File not found: $backup_file"; exit 1; }
     
     log "Restoring from $backup_file..."
-    stop_chroot
-    
-    rm -rf "$CHROOT_PATH"
+
+    # Stop chroot if running
+    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+        stop_chroot
+    fi
+
+    # Unmount sparse image if mounted
+    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
+        log "Unmounting sparse image..."
+        umount -f "$CHROOT_PATH" 2>/dev/null || umount -l "$CHROOT_PATH" 2>/dev/null || {
+            error "Failed to unmount sparse image"
+            exit 1
+        }
+    fi
+
+    # Remove sparse image if it exists (restore will create directory-based chroot)
+    if [ -f "$ROOTFS_IMG" ]; then
+        log "Removing sparse image file..."
+        rm -f "$ROOTFS_IMG" || { error "Failed to remove sparse image file"; exit 1; }
+    fi
+
+    # Remove existing chroot directory
+    if [ -d "$CHROOT_PATH" ]; then
+        log "Removing existing chroot directory..."
+        rm -rf "$CHROOT_PATH" || { error "Failed to remove existing chroot directory"; exit 1; }
+    fi
+
     mkdir -p "$CHROOT_PATH"
     
     if busybox tar -xzf "$backup_file" -C "$CHROOT_PATH"; then
@@ -332,6 +475,13 @@ uninstall_chroot() {
     log "Uninstalling..."
     stop_chroot
     
+    # Remove sparse image if it exists
+    if [ -f "$ROOTFS_IMG" ]; then
+        log "Removing sparse image file..."
+        rm -f "$ROOTFS_IMG" || { error "Failed to remove sparse image file."; exit 1; }
+        log "Sparse image removed."
+    fi
+
     if [ -d "$CHROOT_PATH" ]; then
         rm -rf "$CHROOT_PATH"
         log "Chroot files removed."

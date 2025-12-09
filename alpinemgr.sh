@@ -140,19 +140,24 @@ create_namespace() {
 
 advanced_mount() {
     local src="$1" tgt="$2" type="$3" opts="$4"
+    local mount_exit=0
     [ ! -d "$tgt" ] && _execute_in_ns mkdir -p "$tgt" 2>/dev/null
     
     if [ "$type" = "bind" ]; then
         _execute_in_ns mount --bind "$src" "$tgt"
+        mount_exit=$?
     else
         _execute_in_ns mount -t "$type" $opts "$type" "$tgt"
+        mount_exit=$?
     fi
 
-    if [ $? -eq 0 ]; then
+    if [ $mount_exit -eq 0 ]; then
         echo "$tgt" >> "$MOUNTED_FILE"
     else
         warn "Failed to mount $tgt"
     fi
+
+    return $mount_exit
 }
 
 apply_internet_fix() {
@@ -281,6 +286,11 @@ start_chroot() {
             fi
         else
             warn "Devices cgroup controller not available."
+        fi
+
+        # Mount 'systemd' cgroup
+        if ! advanced_mount "cgroup" "$CHROOT_PATH/sys/fs/cgroup/systemd" "cgroup" "-o none,name=systemd"; then
+            warn "Failed to mount cgroup systemd."
         fi
     else
         warn "Failed to mount cgroup tmpfs."

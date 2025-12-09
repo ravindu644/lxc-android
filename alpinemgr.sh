@@ -214,18 +214,6 @@ start_chroot() {
         else
             warn "Devices cgroup controller not available."
         fi
-
-        # Mount other common controllers if available
-        for subsys in cpu memory freezer cpuset; do
-            if grep -q "$subsys" /proc/cgroups 2>/dev/null; then
-                _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup/$subsys"
-                if _execute_in_ns mount -t cgroup -o "$subsys" cgroup "$CHROOT_PATH/sys/fs/cgroup/$subsys" 2>/dev/null; then
-                    echo "$CHROOT_PATH/sys/fs/cgroup/$subsys" >> "$MOUNTED_FILE"
-                else
-                    warn "Failed to mount cgroup $subsys."
-                fi
-            fi
-        done
     else
         warn "Failed to mount cgroup tmpfs."
     fi

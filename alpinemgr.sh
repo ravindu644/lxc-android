@@ -156,6 +156,7 @@ apply_internet_fix() {
 
     run_in_chroot "echo '$C_HOSTNAME' > /etc/hostname"
     run_in_chroot "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts"
+    run_in_chroot hostname "$C_HOSTNAME"
     run_in_chroot "echo -e '$dns_servers' > /etc/resolv.conf"
 
     # 1.5. Disable IPv6 completely

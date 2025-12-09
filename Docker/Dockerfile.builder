@@ -12,6 +12,13 @@ RUN apk update && \
     gzip && \
     rm -rf /var/cache/apk/*
 
+# Configure LXC default settings
+RUN mkdir -p /etc/lxc && \
+    cat > /etc/lxc/default.conf << 'EOF'
+lxc.net.0.type = none
+lxc.namespace.share.net = /proc/1/ns/net
+EOF
+
 # Stage 2: Export to scratch for extraction
 FROM scratch AS export
 

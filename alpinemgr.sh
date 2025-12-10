@@ -1,10 +1,10 @@
 #!/system/bin/sh
 
-# Alphine rootfs manager
+# Alpine rootfs manager
 # Made to run LXC installed on a minimal Alpine rootfs
 
 # --- Configuration ---
-BASE_CHROOT_DIR="/data/local/alpine-chroot"
+BASE_CHROOT_DIR="/data/local/alpine-rootfs"
 CHROOT_PATH="${BASE_CHROOT_DIR}/rootfs"
 ROOTFS_IMG="${BASE_CHROOT_DIR}/rootfs.img"
 SCRIPT_NAME="$(basename "$0")"
@@ -36,7 +36,7 @@ error() { echo "[ERROR] $1"; }
 android_optimizations() {
     local mode="$1"
     if [ "$mode" = "--enable" ]; then
-        # Prevent Android from killing the chroot process
+        # Prevent Android from killing the rootfs process
         cmd device_config put activity_manager max_phantom_processes 2147483647 >/dev/null 2>&1
         cmd device_config set_sync_disabled_for_tests persistent >/dev/null 2>&1
         dumpsys deviceidle disable >/dev/null 2>&1
@@ -82,7 +82,7 @@ _execute_in_ns() {
 }
 
 run_in_ns() {
-    # Wrapper to execute a command in the namespace but not yet in the chroot.
+    # Wrapper to execute a command in the namespace but not yet in the rootfs.
     # Falls back to direct execution if namespace not available.
     if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
         _execute_in_ns "$@"
@@ -92,7 +92,7 @@ run_in_ns() {
     fi
 }
 
-run_in_chroot() {
+run_in_rootfs() {
     local command="$*"
     local path_export="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'"
     _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$path_export; $command"
@@ -171,23 +171,23 @@ apply_internet_fix() {
     [ -n "$d1" ] && dns_servers="nameserver $d1"
     [ -n "$d2" ] && dns_servers="$dns_servers\nnameserver $d2"
 
-    run_in_chroot "echo '$C_HOSTNAME' > /etc/hostname"
-    run_in_chroot "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts"
-    run_in_chroot hostname "$C_HOSTNAME"
-    run_in_chroot "echo -e '$dns_servers' > /etc/resolv.conf"
+    run_in_rootfs "echo '$C_HOSTNAME' > /etc/hostname"
+    run_in_rootfs "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts"
+    run_in_rootfs hostname "$C_HOSTNAME"
+    run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf"
 
     # 1.5. Disable IPv6 completely and enable IPv4 forwarding
-    run_in_chroot "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true"
-    run_in_chroot "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || true"
+    run_in_rootfs "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true"
+    run_in_rootfs "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || true"
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
 
     # 2. Android GIDs (Permissions)
     # Using busybox syntax or raw file append to be distro-agnostic
-    run_in_chroot "grep -q '^aid_inet:' /etc/group || echo 'aid_inet:x:3003:root' >> /etc/group"
-    run_in_chroot "grep -q '^aid_net_raw:' /etc/group || echo 'aid_net_raw:x:3004:root' >> /etc/group"
+    run_in_rootfs "grep -q '^aid_inet:' /etc/group || echo 'aid_inet:x:3003:root' >> /etc/group"
+    run_in_rootfs "grep -q '^aid_net_raw:' /etc/group || echo 'aid_net_raw:x:3004:root' >> /etc/group"
 
     # 3. Fix root groups if usermod exists, otherwise we rely on manual /etc/group editing above
-    run_in_chroot "command -v usermod >/dev/null && usermod -a -G aid_inet,aid_net_raw root 2>/dev/null || true"
+    run_in_rootfs "command -v usermod >/dev/null && usermod -a -G aid_inet,aid_net_raw root 2>/dev/null || true"
 
     # 4. Flush filter chains and forward all the LXC traffic to localhost
     run_in_ns iptables -t filter -F
@@ -196,13 +196,13 @@ apply_internet_fix() {
     run_in_ns iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 -m udp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
 }
 
-start_chroot() {
+start_rootfs() {
     if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
-        log "Chroot already running."
+        log "Rootfs already running."
         return
     fi
 
-    log "Starting Alpine Chroot..."
+    log "Starting Alpine Rootfs..."
     setenforce 0 2>/dev/null
 
     # 1. Create Namespace
@@ -256,7 +256,7 @@ start_chroot() {
             log "Sparse image mounted successfully"
         fi
     else
-        # Directory-based chroot - check if directory exists
+        # Directory-based rootfs - check if directory exists
         [ ! -d "$CHROOT_PATH" ] && { error "Directory $CHROOT_PATH not found"; exit 1; }
     fi
 
@@ -306,7 +306,7 @@ start_chroot() {
     # Dev Mounts
     if grep -q devtmpfs /proc/filesystems; then
         advanced_mount "devtmpfs" "$CHROOT_PATH/dev" "devtmpfs" "-o mode=755"
-        run_in_chroot "umount /dev/fd 2>/dev/null || true && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
+        run_in_rootfs "umount /dev/fd 2>/dev/null || true && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
     else
         advanced_mount "/dev" "$CHROOT_PATH/dev" "bind"
     fi
@@ -325,11 +325,11 @@ start_chroot() {
     apply_internet_fix
     android_optimizations --enable
 
-    log "Chroot started successfully."
+    log "Rootfs started successfully."
 }
 
-umount_chroot() {
-    log "Unmounting chroot filesystems..."
+umount_rootfs() {
+    log "Unmounting rootfs filesystems..."
 
     # Unmount mounts recorded in file
     if [ -f "$MOUNTED_FILE" ]; then
@@ -341,19 +341,19 @@ umount_chroot() {
             esac
         done
         rm -f "$MOUNTED_FILE"
-        log "All chroot mounts unmounted."
+        log "All rootfs mounts unmounted."
     fi
 }
 
-stop_chroot() {
-    log "Stopping chroot..."
+stop_rootfs() {
+    log "Stopping rootfs..."
     
-    # Kill processes inside chroot path
+    # Kill processes inside rootfs path
     local pids=$(lsof 2>/dev/null | grep "$CHROOT_PATH" | awk '{print $2}' | uniq)
     [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 
     # Unmount filesystems (BEFORE killing namespace holder)
-    umount_chroot
+    umount_rootfs
 
     # Unmount sparse image if it exists
     if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
@@ -375,12 +375,12 @@ stop_chroot() {
     log "Stopped."
 }
 
-enter_chroot() {
+enter_rootfs() {
     local user="${1:-root}"
 
     # Check for running Namespace
     if [ ! -f "$HOLDER_PID_FILE" ] || ! kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
-        error "Chroot is not running. Use '$SCRIPT_NAME start' first."
+        error "Rootfs is not running. Use '$SCRIPT_NAME start' first."
         exit 1
     fi
 
@@ -399,15 +399,15 @@ enter_chroot() {
     _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$shell_cmd"
 }
 
-backup_chroot() {
+backup_rootfs() {
     local backup_file="$1"
     [ -z "$backup_file" ] && { error "Usage: backup <path.tar.gz>"; exit 1; }
     
     log "Backing up to $backup_file..."
     
-    # Stop chroot if running
+    # Stop rootfs if running
     if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
-        stop_chroot
+        stop_rootfs
     fi
 
     sync && sleep 1
@@ -473,15 +473,15 @@ backup_chroot() {
     fi
 }
 
-restore_chroot() {
+restore_rootfs() {
     local backup_file="$1"
     [ ! -f "$backup_file" ] && { error "File not found: $backup_file"; exit 1; }
     
     log "Restoring from $backup_file..."
 
-    # Stop chroot if running
+    # Stop rootfs if running
     if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
-        stop_chroot
+        stop_rootfs
     fi
 
     # Unmount sparse image if mounted
@@ -493,16 +493,16 @@ restore_chroot() {
         }
     fi
 
-    # Remove sparse image if it exists (restore will create directory-based chroot)
+    # Remove sparse image if it exists (restore will create directory-based rootfs)
     if [ -f "$ROOTFS_IMG" ]; then
         log "Removing sparse image file..."
         rm -f "$ROOTFS_IMG" || { error "Failed to remove sparse image file"; exit 1; }
     fi
 
-    # Remove existing chroot directory
+    # Remove existing rootfs directory
     if [ -d "$CHROOT_PATH" ]; then
-        log "Removing existing chroot directory..."
-        rm -rf "$CHROOT_PATH" || { error "Failed to remove existing chroot directory"; exit 1; }
+        log "Removing existing rootfs directory..."
+        rm -rf "$CHROOT_PATH" || { error "Failed to remove existing rootfs directory"; exit 1; }
     fi
 
     mkdir -p "$CHROOT_PATH"
@@ -515,9 +515,9 @@ restore_chroot() {
     fi
 }
 
-uninstall_chroot() {
+uninstall_rootfs() {
     log "Uninstalling..."
-    stop_chroot
+    stop_rootfs
     
     # Remove sparse image if it exists
     if [ -f "$ROOTFS_IMG" ]; then
@@ -528,34 +528,34 @@ uninstall_chroot() {
 
     if [ -d "$CHROOT_PATH" ]; then
         rm -rf "$CHROOT_PATH"
-        log "Chroot files removed."
+        log "Rootfs files removed."
     fi
     
-    rm -f "$SCRIPT_DIR/mount.points" "$SCRIPT_DIR/holder.pid" "$SCRIPT_DIR/holder.pid.flags"
+    rm -f "$MOUNTED_FILE" "$HOLDER_PID_FILE" "$HOLDER_PID_FILE.flags"
 }
 
 # --- CLI Handling ---
 
 case "$1" in
     start)
-        start_chroot
+        start_rootfs
         # Auto-enter shell if running in interactive terminal
         if [ -t 1 ]; then
-            enter_chroot "${2:-root}"
+            enter_rootfs "${2:-root}"
         fi
         ;;
     stop)
-        stop_chroot
+        stop_rootfs
         ;;
     restart)
-        log "Restarting chroot..."
-        stop_chroot
+        log "Restarting rootfs..."
+        stop_rootfs
         sleep 1
         sync
-        start_chroot
+        start_rootfs
         # Auto-enter shell if running in interactive terminal
         if [ -t 1 ]; then
-            enter_chroot "${2:-root}"
+            enter_rootfs "${2:-root}"
         fi
         ;;
     status)
@@ -566,21 +566,21 @@ case "$1" in
         fi
         ;;
     enter)
-        enter_chroot "$2"
+        enter_rootfs "$2"
         ;;
     run)
         shift
         [ -z "$1" ] && { error "Command required."; exit 1; }
-        run_in_chroot "$*"
+        run_in_rootfs "$*"
         ;;
     backup)
-        backup_chroot "$2"
+        backup_rootfs "$2"
         ;;
     restore)
-        restore_chroot "$2"
+        restore_rootfs "$2"
         ;;
     uninstall)
-        uninstall_chroot
+        uninstall_rootfs
         ;;
     *)
         echo "Usage: $SCRIPT_NAME {start|stop|restart|status|enter [user]|run <cmd>|backup <file>|restore <file>|uninstall}"

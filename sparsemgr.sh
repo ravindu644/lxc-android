@@ -1,18 +1,18 @@
 #!/system/bin/sh
-# Sparse Image Manager for Alpine Chroot Migration
+# Sparse Image Manager for Alpine Rootfs Migration
 # Copyright (c) 2025 ravindu644
 # Usage: sparsemgr.sh [options] <command> [args]
 
 # Default configuration - can be overridden
-DEFAULT_CHROOT_DIR="/data/local/alpine-chroot"
-CHROOT_DIR="${CHROOT_DIR:-$DEFAULT_CHROOT_DIR}"
+DEFAULT_ROOTFS_DIR="/data/local/alpine-rootfs"
+ROOTFS_DIR="${ROOTFS_DIR:-$DEFAULT_ROOTFS_DIR}"
 SCRIPT_NAME="$(basename "$0")"
 
 # --- Debug mode ---
 LOGGING_ENABLED=${LOGGING_ENABLED:-0}
 
 if [ "$LOGGING_ENABLED" -eq 1 ]; then
-    LOG_DIR="${CHROOT_DIR%/*}/logs"
+    LOG_DIR="${ROOTFS_DIR%/*}/logs"
     mkdir -p "$LOG_DIR"
     LOG_FILE="$LOG_DIR/$SCRIPT_NAME.txt"
     LOG_FIFO="$LOG_DIR/$SCRIPT_NAME.fifo"
@@ -26,26 +26,26 @@ fi
 # Parse command line arguments
 while [ $# -gt 0 ]; do
     case "$1" in
-        --chroot-dir|-d)
-            CHROOT_DIR="$2"
+        --rootfs-dir|-d)
+            ROOTFS_DIR="$2"
             shift 2
             ;;
         --help|-h)
             echo "Usage: $0 [options] <command> [args]"
             echo ""
             echo "Options:"
-            echo "  --chroot-dir DIR, -d DIR    Set chroot directory (default: $DEFAULT_CHROOT_DIR)"
+            echo "  --rootfs-dir DIR, -d DIR    Set rootfs directory (default: $DEFAULT_ROOTFS_DIR)"
             echo ""
             echo "Commands:"
             echo "  migrate <size_gb>           Migrate to sparse image"
             echo ""
             echo "Environment Variables:"
-            echo "  CHROOT_DIR                  Override default chroot directory"
+            echo "  ROOTFS_DIR                  Override default rootfs directory"
             echo ""
             echo "Examples:"
             echo "  $0 migrate 8"
-            echo "  $0 --chroot-dir /custom/path migrate 16"
-            echo "  CHROOT_DIR=/custom/path $0 migrate 8"
+            echo "  $0 --rootfs-dir /custom/path migrate 16"
+            echo "  ROOTFS_DIR=/custom/path $0 migrate 8"
             exit 0
             ;;
         *)
@@ -55,40 +55,41 @@ while [ $# -gt 0 ]; do
 done
 
 # Set derived paths
-ROOTFS_DIR="$CHROOT_DIR/rootfs"
-ROOTFS_IMG="$CHROOT_DIR/rootfs.img"
-ROOTFS_SPARSE="$CHROOT_DIR/rootfs.sparse"
+BASE_ROOTFS_DIR="$ROOTFS_DIR"
+ROOTFS_DIR="$ROOTFS_DIR/rootfs"
+ROOTFS_IMG="$BASE_ROOTFS_DIR/rootfs.img"
+ROOTFS_SPARSE="$BASE_ROOTFS_DIR/rootfs.sparse"
 
 # Logging functions
 log() { echo "[SPARSE] $1"; }
 error() { echo "[ERROR] $1"; }
 warn() { echo "[WARN] $1"; }
 
-# Check if chroot is running
-is_chroot_running() {
-    # Use chroot.sh status command to check if running
-    if "$CHROOT_DIR/chroot.sh" status 2>/dev/null | grep -q "RUNNING"; then
+# Check if rootfs is running
+is_rootfs_running() {
+    # Use alpinemgr.sh status command to check if running
+    if "$BASE_ROOTFS_DIR/alpinemgr.sh" status 2>/dev/null | grep -q "RUNNING"; then
         return 0  # Running
     else
         return 1  # Not running
     fi
 }
 
-# Stop chroot if running
-stop_chroot_if_running() {
-    if is_chroot_running; then
-        log "Chroot is currently running. Stopping it before migration..."
-        if ! "$CHROOT_DIR/chroot.sh" stop 2>/dev/null; then
-            warn "Failed to stop chroot automatically. Please stop it manually before migration."
-            error "Cannot proceed with migration while chroot is running"
+# Stop rootfs if running
+stop_rootfs_if_running() {
+    if is_rootfs_running; then
+        log "Rootfs is currently running. Stopping it before migration..."
+        if ! "$BASE_ROOTFS_DIR/alpinemgr.sh" stop 2>/dev/null; then
+            warn "Failed to stop rootfs automatically. Please stop it manually before migration."
+            error "Cannot proceed with migration while rootfs is running"
             exit 1
         fi
-        log "Chroot stopped successfully"
+        log "Rootfs stopped successfully"
 
         # Give a moment for processes to fully stop
         busybox sleep 2
     else
-        log "Chroot is not running - proceeding with migration"
+        log "Rootfs is not running - proceeding with migration"
     fi
 }
 
@@ -172,13 +173,13 @@ create_sparse_image() {
     log "Formatting sparse image with ext4..."
     # Try mkfs.ext4 first, fallback to mke2fs
     if command -v mkfs.ext4 >/dev/null 2>&1; then
-        if ! mkfs.ext4 -F -L "ubuntu-chroot" "$img_path" 2>&1; then
+        if ! mkfs.ext4 -F -L "alpine-rootfs" "$img_path" 2>&1; then
             error "Failed to format sparse image with mkfs.ext4"
             busybox rm -f "$img_path"
             return 1
         fi
     elif command -v mke2fs >/dev/null 2>&1; then
-        if ! mke2fs -t ext4 -F -L "ubuntu-chroot" "$img_path" 2>&1; then
+        if ! mke2fs -t ext4 -F -L "alpine-rootfs" "$img_path" 2>&1; then
             error "Failed to format sparse image with mke2fs"
             busybox rm -f "$img_path"
             return 1
@@ -276,8 +277,8 @@ migrate_to_sparse() {
     log "Starting migration to sparse image (${size_gb}GB)"
     log "Source: $ROOTFS_DIR"
 
-    # Stop chroot if it's running (CRITICAL for data integrity)
-    stop_chroot_if_running
+    # Stop rootfs if it's running (CRITICAL for data integrity)
+    stop_rootfs_if_running
 
     # Set up error trap for cleanup
     trap cleanup_on_error ERR
@@ -344,7 +345,7 @@ migrate_to_sparse() {
     log "Sparse image: $ROOTFS_IMG (${size_gb}GB)"
     log "Rootfs directory: $ROOTFS_DIR"
     log ""
-    log "IMPORTANT: Your chroot is now using a sparse image."
+    log "IMPORTANT: Your rootfs is now using a sparse image."
     log "To mount it, use: mount -t ext4 -o loop,rw,noatime,nodiratime,barrier=0 $ROOTFS_IMG $ROOTFS_DIR"
 
     return 0
@@ -363,26 +364,26 @@ case "$1" in
         migrate_to_sparse "$2"
         ;;
     *)
-        echo "Sparse Image Manager for Chroot Migration"
+        echo "Sparse Image Manager for Rootfs Migration"
         echo "Usage: $0 [options] <command> [args]"
         echo ""
         echo "Options:"
-        echo "  --chroot-dir DIR, -d DIR    Set chroot directory (default: $DEFAULT_CHROOT_DIR)"
+        echo "  --rootfs-dir DIR, -d DIR    Set rootfs directory (default: $DEFAULT_ROOTFS_DIR)"
         echo "  --help, -h                  Show this help message"
         echo ""
         echo "Commands:"
         echo "  migrate <size_gb>           Migrate to sparse image (size: 4-64 GB)"
         echo ""
         echo "Environment Variables:"
-        echo "  CHROOT_DIR                  Override default chroot directory"
+        echo "  ROOTFS_DIR                  Override default rootfs directory"
         echo ""
         echo "Examples:"
         echo "  $0 migrate 8"
-        echo "  $0 --chroot-dir /custom/path migrate 16"
-        echo "  CHROOT_DIR=/custom/path $0 migrate 8"
+        echo "  $0 --rootfs-dir /custom/path migrate 16"
+        echo "  ROOTFS_DIR=/custom/path $0 migrate 8"
         echo ""
         echo "Description:"
-        echo "  Migrates your existing Ubuntu chroot from a directory-based"
+        echo "  Migrates your existing Alpine rootfs from a directory-based"
         echo "  rootfs to a sparse ext4 image for better performance and"
         echo "  space efficiency."
         echo ""

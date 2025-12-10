@@ -1,0 +1,11 @@
+Do you know?
+
+There is a 99.9999999 % chance this is not going to work on your device, so do not waste your time on it.
+
+This is purely for my personal purposes.
+
+To make this work, you need a heavily modified custom kernel built with all the configs enabled for Docker and LXC.
+
+Even with that, it still will not work if your kernel is old.
+
+If your kernel is GKI 2 (5.10 or above), good luck. The chances of getting this to work are 99.9999999967 % impossible.

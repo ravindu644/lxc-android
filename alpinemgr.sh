@@ -192,6 +192,11 @@ apply_internet_fix() {
     # 4. Flush filter chains and forward all the LXC traffic to localhost
     run_in_ns iptables -t filter -F
     run_in_ns ip6tables -t filter -F
+
+    # Allow forwarding
+    run_in_ns iptables -P FORWARD ACCEPT
+
+    # Forward all traffic to localhost
     run_in_ns iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 -m tcp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
     run_in_ns iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 -m udp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
 }

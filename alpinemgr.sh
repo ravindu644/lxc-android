@@ -4,7 +4,7 @@
 # Made to run LXC installed on a minimal Alpine rootfs
 
 # --- Configuration ---
-BASE_CHROOT_DIR="/data/local/alpine-rootfs"
+BASE_CHROOT_DIR="${BASE_CHROOT_DIR:-/data/local/alpine-rootfs}"
 CHROOT_PATH="${BASE_CHROOT_DIR}/rootfs"
 ROOTFS_IMG="${BASE_CHROOT_DIR}/rootfs.img"
 SCRIPT_NAME="$(basename "$0")"

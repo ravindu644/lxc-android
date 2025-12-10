@@ -176,13 +176,21 @@ apply_internet_fix() {
     run_in_rootfs hostname "$C_HOSTNAME"
     run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf"
 
-    # 1.5. Disable IPv6 completely and enable IPv4 forwarding
-    run_in_rootfs "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true"
-    run_in_rootfs "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null || true"
+    # 1.5. Enable IPv4 forwarding and enable IPv6
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+    sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1
+    sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1
+
+    # 1.6. Detect default gateway & interface
+    # Fixes tailscale issues
+    DEFAULT_IFACE=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+    DEFAULT_GW=$(ip route get 8.8.8.8 | awk '/via/ {for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+    if [ -n "$DEFAULT_IFACE" ] && [ -n "$DEFAULT_GW" ]; then
+        ip route add default via "$DEFAULT_GW" dev "$DEFAULT_IFACE" >/dev/null 2>&1 || true
+        log "Added default route via $DEFAULT_GW on $DEFAULT_IFACE"
+    fi
 
     # 2. Android GIDs (Permissions)
-    # Using busybox syntax or raw file append to be distro-agnostic
     run_in_rootfs "grep -q '^aid_inet:' /etc/group || echo 'aid_inet:x:3003:root' >> /etc/group"
     run_in_rootfs "grep -q '^aid_net_raw:' /etc/group || echo 'aid_net_raw:x:3004:root' >> /etc/group"
 
@@ -193,10 +201,8 @@ apply_internet_fix() {
     run_in_ns iptables -t filter -F
     run_in_ns ip6tables -t filter -F
 
-    # Allow forwarding
-    run_in_ns iptables -P FORWARD ACCEPT
-
     # Forward all traffic to localhost
+    run_in_ns iptables -P FORWARD ACCEPT
     run_in_ns iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 -m tcp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
     run_in_ns iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 -m udp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
 }

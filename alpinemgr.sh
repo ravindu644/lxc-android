@@ -176,10 +176,10 @@ apply_internet_fix() {
     run_in_rootfs hostname "$C_HOSTNAME"
     run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf"
 
-    # 1.5. Enable IPv4 forwarding and enable IPv6
+    # 1.5. Enable IPv4 forwarding and disable IPv6
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-    sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1
-    sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1
 
     # 1.6. Detect default gateway & interface
     # Fixes tailscale issues

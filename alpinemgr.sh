@@ -95,7 +95,7 @@ run_in_ns() {
 run_in_rootfs() {
     local command="$*"
     local path_export="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'"
-    _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$path_export; $command"
+    _execute_in_ns chroot "$CHROOT_PATH" /bin/bash -c "$path_export; $command"
 }
 
 create_namespace() {
@@ -403,11 +403,11 @@ enter_rootfs() {
 
     log "Entering shell as $user..."
     
-    # Alpine typically uses /bin/sh (ash). bash might not be installed.
-    local common_exports="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' ; unset TERM"
+    # Use bash since it's installed in the rootfs
+    local common_exports="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' ; export TERM=xterm"
     local shell_cmd="$common_exports; exec /bin/su - $user"
     
-    _execute_in_ns chroot "$CHROOT_PATH" /bin/sh -c "$shell_cmd"
+    _execute_in_ns chroot "$CHROOT_PATH" /bin/bash -c "$shell_cmd"
 }
 
 backup_rootfs() {

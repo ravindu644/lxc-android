@@ -1,3 +1,4 @@
+# run this inside the container
 # Edit resolved config
 mkdir -p /etc/systemd/resolved.conf.d/
 cat > /etc/systemd/resolved.conf.d/dns.conf << EOF

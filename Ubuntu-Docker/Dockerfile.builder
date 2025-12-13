@@ -180,6 +180,14 @@ RUN echo '#!/bin/bash' > /root/.bashrc && \
     echo '    . /etc/bash_completion' >> /root/.bashrc && \
     echo 'fi' >> /root/.bashrc
 
+# Fix internet
+RUN mkdir -p /etc/systemd/resolved.conf.d/ && \
+    cat > /etc/systemd/resolved.conf.d/dns.conf << 'EOF'
+[Resolve]
+DNS=8.8.8.8 8.8.4.4
+FallbackDNS=1.1.1.1
+EOF
+
 # Purge and reinstall qemu and binfmt in the exact order specified
 RUN apt-get purge -y qemu-* binfmt-support && \
     apt-get autoremove -y && \

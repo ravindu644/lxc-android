@@ -25,7 +25,8 @@ on_install() {
 
     # Extract and setup Alpine rootfs for LXC
     setup_rootfs
-    extract_rootfs
+    extract_rootfs && \
+        echo -e "\n- Use command 'lxcmgr' to manage LXC\n"
 
     # Clear package cache to avoid conflicts
     rm -rf /data/system/package_cache/*

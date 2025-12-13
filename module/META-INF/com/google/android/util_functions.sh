@@ -7,6 +7,8 @@ TMPDIR=/dev/tmp
 ROOTFS_DIR="/data/local/alpine-rootfs"
 VERSION_FILE="$ROOTFS_DIR/version"
 
+mkdir -p "${ROOTFS_DIR}" 2>/dev/null
+
 # Detect root method
 detect_root() {
     if command -v magisk >/dev/null 2>&1; then

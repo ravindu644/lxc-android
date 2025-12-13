@@ -51,9 +51,9 @@ find_rootfs_file() {
 extract_rootfs() {
     echo "- Preparing to extract Alpine rootfs for LXC..."
 
-    # Extract experimental config (for SPARSE_IMAGE_SIZE)
-    if unzip -oj "$ZIPFILE" 'experimental.conf' -d "$MODPATH" >&2 2>/dev/null; then
-        . "$MODPATH/experimental.conf" 2>/dev/null
+    # Extract rootfs config (for SPARSE_IMAGE_SIZE)
+    if unzip -oj "$ZIPFILE" 'rootfs.conf' -d "$MODPATH" >&2 2>/dev/null; then
+        . "$MODPATH/rootfs.conf" 2>/dev/null
     fi
 
     # Find rootfs file

@@ -1,0 +1,6 @@
+id=lxc-android
+name=LXC on Android
+author=ravindu644
+description=A module for installing LXC on Android
+version=v1.0
+versionCode=1000

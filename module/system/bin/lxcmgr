@@ -4,14 +4,14 @@
 # Made to run LXC installed on a minimal Alpine rootfs
 
 # --- Configuration ---
-BASE_CHROOT_DIR="${BASE_CHROOT_DIR:-/data/local/alpine-rootfs}"
-CHROOT_PATH="${BASE_CHROOT_DIR}/rootfs"
-ROOTFS_IMG="${BASE_CHROOT_DIR}/rootfs.img"
+BASE_ROOTFS_DIR="${BASE_ROOTFS_DIR:-/data/local/alpine-rootfs}"
+ROOTFS_PATH="${BASE_ROOTFS_DIR}/rootfs"
+ROOTFS_IMG="${BASE_ROOTFS_DIR}/rootfs.img"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(dirname "$0")"
 C_HOSTNAME="alpine"
-MOUNTED_FILE="${BASE_CHROOT_DIR}/mount.points"
-HOLDER_PID_FILE="${BASE_CHROOT_DIR}/holder.pid"
+MOUNTED_FILE="${BASE_ROOTFS_DIR}/mount.points"
+HOLDER_PID_FILE="${BASE_ROOTFS_DIR}/holder.pid"
 SILENT=0
 
 # --- Pre-flight Checks ---
@@ -95,7 +95,7 @@ run_in_ns() {
 run_in_rootfs() {
     local command="$*"
     local path_export="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'"
-    _execute_in_ns chroot "$CHROOT_PATH" /bin/bash -c "$path_export; $command"
+    _execute_in_ns chroot "$ROOTFS_PATH" /bin/bash -c "$path_export; $command"
 }
 
 create_namespace() {
@@ -224,9 +224,9 @@ start_rootfs() {
     if [ -f "$ROOTFS_IMG" ]; then
         log "Sparse image detected"
 
-        if mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
+        if mountpoint -q "$ROOTFS_PATH" 2>/dev/null; then
             log "Sparse image already mounted, unmounting first..."
-            if umount -f "$CHROOT_PATH" 2>/dev/null || umount -l "$CHROOT_PATH" 2>/dev/null; then
+            if umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null; then
                 log "Previous mount cleaned up"
             else
                 warn "Failed to unmount previous mount, continuing anyway"
@@ -260,7 +260,7 @@ start_rootfs() {
         sleep 1
 
         log "Mounting sparse image to rootfs..."
-        if ! _execute_in_ns mount -t ext4 -o loop,rw,noatime,nodiratime,errors=remount-ro "$ROOTFS_IMG" "$CHROOT_PATH"; then
+        if ! _execute_in_ns mount -t ext4 -o loop,rw,noatime,nodiratime,errors=remount-ro "$ROOTFS_IMG" "$ROOTFS_PATH"; then
             error "Failed to mount sparse image"
             exit 1
         else
@@ -268,7 +268,7 @@ start_rootfs() {
         fi
     else
         # Directory-based rootfs - check if directory exists
-        [ ! -d "$CHROOT_PATH" ] && { error "Directory $CHROOT_PATH not found"; exit 1; }
+        [ ! -d "$ROOTFS_PATH" ] && { error "Directory $ROOTFS_PATH not found"; exit 1; }
     fi
 
     # 2. Prepare Mounts
@@ -282,23 +282,23 @@ start_rootfs() {
     fi
 
     # Standard Linux Mounts
-    advanced_mount "proc" "$CHROOT_PATH/proc" "proc" "-o rw,nosuid,nodev,noexec,relatime"
-    advanced_mount "sysfs" "$CHROOT_PATH/sys" "sysfs" "-o rw,nosuid,nodev,noexec,relatime"
+    advanced_mount "proc" "$ROOTFS_PATH/proc" "proc" "-o rw,nosuid,nodev,noexec,relatime"
+    advanced_mount "sysfs" "$ROOTFS_PATH/sys" "sysfs" "-o rw,nosuid,nodev,noexec,relatime"
 
     # Essential for LXC functionality
     log "Setting up cgroups for LXC..."
 
-    _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup"
+    _execute_in_ns mkdir -p "$ROOTFS_PATH/sys/fs/cgroup"
 
-    if _execute_in_ns mount -t tmpfs -o mode=755,rw,nosuid,nodev,noexec,relatime tmpfs "$CHROOT_PATH/sys/fs/cgroup" 2>/dev/null; then
-        echo "$CHROOT_PATH/sys/fs/cgroup" >> "$MOUNTED_FILE"
+    if _execute_in_ns mount -t tmpfs -o mode=755,rw,nosuid,nodev,noexec,relatime tmpfs "$ROOTFS_PATH/sys/fs/cgroup" 2>/dev/null; then
+        echo "$ROOTFS_PATH/sys/fs/cgroup" >> "$MOUNTED_FILE"
 
         # Mount 'devices' cgroup (Critical for LXC)
-        _execute_in_ns mkdir -p "$CHROOT_PATH/sys/fs/cgroup/devices"
+        _execute_in_ns mkdir -p "$ROOTFS_PATH/sys/fs/cgroup/devices"
         if grep -q devices /proc/cgroups 2>/dev/null; then
-            if _execute_in_ns mount -t cgroup -o devices cgroup "$CHROOT_PATH/sys/fs/cgroup/devices" 2>/dev/null; then
+            if _execute_in_ns mount -t cgroup -o devices cgroup "$ROOTFS_PATH/sys/fs/cgroup/devices" 2>/dev/null; then
                 log "Cgroup devices mounted successfully."
-                echo "$CHROOT_PATH/sys/fs/cgroup/devices" >> "$MOUNTED_FILE"
+                echo "$ROOTFS_PATH/sys/fs/cgroup/devices" >> "$MOUNTED_FILE"
             else
                 warn "Failed to mount cgroup devices."
             fi
@@ -307,7 +307,7 @@ start_rootfs() {
         fi
 
         # Mount 'systemd' cgroup
-        if ! advanced_mount "cgroup" "$CHROOT_PATH/sys/fs/cgroup/systemd" "cgroup" "-o none,name=systemd"; then
+        if ! advanced_mount "cgroup" "$ROOTFS_PATH/sys/fs/cgroup/systemd" "cgroup" "-o none,name=systemd"; then
             warn "Failed to mount cgroup systemd."
         fi
     else
@@ -316,21 +316,21 @@ start_rootfs() {
 
     # Dev Mounts
     if grep -q devtmpfs /proc/filesystems; then
-        advanced_mount "devtmpfs" "$CHROOT_PATH/dev" "devtmpfs" "-o mode=755"
+        advanced_mount "devtmpfs" "$ROOTFS_PATH/dev" "devtmpfs" "-o mode=755"
         run_in_rootfs "umount /dev/fd 2>/dev/null || true && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
     else
-        advanced_mount "/dev" "$CHROOT_PATH/dev" "bind"
+        advanced_mount "/dev" "$ROOTFS_PATH/dev" "bind"
     fi
 
     # Mount binfmt_misc if supported
     if grep -q binfmt_misc /proc/filesystems; then
-        advanced_mount "binfmt_misc" "$CHROOT_PATH/proc/sys/fs/binfmt_misc" "binfmt_misc" ""
+        advanced_mount "binfmt_misc" "$ROOTFS_PATH/proc/sys/fs/binfmt_misc" "binfmt_misc" ""
     fi
 
-    advanced_mount "devpts" "$CHROOT_PATH/dev/pts" "devpts" "-o rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000"
-    advanced_mount "tmpfs" "$CHROOT_PATH/tmp" "tmpfs" "-o rw,nosuid,nodev,relatime,size=256M"
-    advanced_mount "tmpfs" "$CHROOT_PATH/run" "tmpfs" "-o rw,nosuid,nodev,relatime,size=64M"
-    advanced_mount "tmpfs" "$CHROOT_PATH/dev/shm" "tmpfs" "-o mode=1777"
+    advanced_mount "devpts" "$ROOTFS_PATH/dev/pts" "devpts" "-o rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000"
+    advanced_mount "tmpfs" "$ROOTFS_PATH/tmp" "tmpfs" "-o rw,nosuid,nodev,relatime,size=256M"
+    advanced_mount "tmpfs" "$ROOTFS_PATH/run" "tmpfs" "-o rw,nosuid,nodev,relatime,size=64M"
+    advanced_mount "tmpfs" "$ROOTFS_PATH/dev/shm" "tmpfs" "-o mode=1777"
 
     # 3. Optimizations & Fixes
     apply_internet_fix
@@ -347,7 +347,7 @@ umount_rootfs() {
         # Unmount in reverse order (deepest first)
         sort -r "$MOUNTED_FILE" | while read -r mount_point; do
             case "$mount_point" in
-                "$CHROOT_PATH"/sys*) run_in_ns umount -l "$mount_point" 2>/dev/null ;;
+                "$ROOTFS_PATH"/sys*) run_in_ns umount -l "$mount_point" 2>/dev/null ;;
                 *) run_in_ns umount "$mount_point" 2>/dev/null ;;
             esac
         done
@@ -360,16 +360,16 @@ stop_rootfs() {
     log "Stopping rootfs..."
     
     # Kill processes inside rootfs path
-    local pids=$(lsof 2>/dev/null | grep "$CHROOT_PATH" | awk '{print $2}' | uniq)
+    local pids=$(lsof 2>/dev/null | grep "$ROOTFS_PATH" | awk '{print $2}' | uniq)
     [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 
     # Unmount filesystems (BEFORE killing namespace holder)
     umount_rootfs
 
     # Unmount sparse image if it exists
-    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
+    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$ROOTFS_PATH" 2>/dev/null; then
         log "Unmounting sparse image..."
-        if umount -f "$CHROOT_PATH" 2>/dev/null || umount -l "$CHROOT_PATH" 2>/dev/null; then
+        if umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null; then
             log "Sparse image unmounted successfully."
         else
             warn "Failed to unmount sparse image."
@@ -407,7 +407,7 @@ enter_rootfs() {
     local common_exports="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' ; export TERM=xterm"
     local shell_cmd="$common_exports; exec /bin/su - $user"
     
-    _execute_in_ns chroot "$CHROOT_PATH" /bin/bash -c "$shell_cmd"
+    _execute_in_ns chroot "$ROOTFS_PATH" /bin/bash -c "$shell_cmd"
 }
 
 backup_rootfs() {
@@ -432,7 +432,7 @@ backup_rootfs() {
         # Sparse image backup method
         log "Using sparse image backup method."
 
-        local temp_mount_point="${CHROOT_PATH}_bkmnt"
+        local temp_mount_point="${ROOTFS_PATH}_bkmnt"
         mkdir -p "$temp_mount_point"
 
         # Check and repair filesystem before mounting
@@ -469,7 +469,7 @@ backup_rootfs() {
     else
         # Directory backup method
         log "Using directory backup method."
-        if busybox tar -czf "$backup_file" -C "$CHROOT_PATH" .; then
+        if busybox tar -czf "$backup_file" -C "$ROOTFS_PATH" .; then
             tar_exit_code=0
         fi
     fi
@@ -496,9 +496,9 @@ restore_rootfs() {
     fi
 
     # Unmount sparse image if mounted
-    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$CHROOT_PATH" 2>/dev/null; then
+    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$ROOTFS_PATH" 2>/dev/null; then
         log "Unmounting sparse image..."
-        umount -f "$CHROOT_PATH" 2>/dev/null || umount -l "$CHROOT_PATH" 2>/dev/null || {
+        umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null || {
             error "Failed to unmount sparse image"
             exit 1
         }
@@ -511,14 +511,14 @@ restore_rootfs() {
     fi
 
     # Remove existing rootfs directory
-    if [ -d "$CHROOT_PATH" ]; then
+    if [ -d "$ROOTFS_PATH" ]; then
         log "Removing existing rootfs directory..."
-        rm -rf "$CHROOT_PATH" || { error "Failed to remove existing rootfs directory"; exit 1; }
+        rm -rf "$ROOTFS_PATH" || { error "Failed to remove existing rootfs directory"; exit 1; }
     fi
 
-    mkdir -p "$CHROOT_PATH"
+    mkdir -p "$ROOTFS_PATH"
     
-    if busybox tar -xzf "$backup_file" -C "$CHROOT_PATH"; then
+    if busybox tar -xzf "$backup_file" -C "$ROOTFS_PATH"; then
         log "Restore complete."
     else
         error "Restore failed."
@@ -537,8 +537,8 @@ uninstall_rootfs() {
         log "Sparse image removed."
     fi
 
-    if [ -d "$CHROOT_PATH" ]; then
-        rm -rf "$CHROOT_PATH"
+    if [ -d "$ROOTFS_PATH" ]; then
+        rm -rf "$ROOTFS_PATH"
         log "Rootfs files removed."
     fi
     

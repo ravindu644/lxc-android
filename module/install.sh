@@ -17,6 +17,11 @@ print_modname() {
 }
 
 on_install() {
+    # Check cgroup devices availability first (before touching anything)
+    if ! check_cgroup_devices; then
+        exit 1
+    fi
+
     # Detect root method and show warnings
     detect_root
 
@@ -38,6 +43,15 @@ set_permissions() {
 
     # Set permissions for LXC management scripts
     set_perm "$MODPATH/system/bin/lxcmgr" 0 0 0755
+
+    # Set permissions for LXC wrapper scripts
+    for script in lxc-attach lxc-autostart lxc-cgroup lxc-checkconfig \
+                  lxc-checkpoint lxc-config lxc-console lxc-copy lxc-create lxc-destroy \
+                  lxc-device lxc-execute lxc-freeze lxc-info lxc-ls lxc-monitor \
+                  lxc-snapshot lxc-start lxc-stop lxc-top lxc-unfreeze lxc-unshare \
+                  lxc-update-config lxc-usernsexec lxc-wait; do
+        set_perm "$MODPATH/system/bin/$script" 0 0 0755
+    done
 
     # Set permissions for module service script
     set_perm "$MODPATH/service.sh" 0 0 0755

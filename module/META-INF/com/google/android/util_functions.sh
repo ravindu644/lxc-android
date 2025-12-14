@@ -9,6 +9,19 @@ VERSION_FILE="$ROOTFS_DIR/version"
 
 mkdir -p "${ROOTFS_DIR}" 2>/dev/null
 
+# Check if cgroup devices are available
+check_cgroup_devices() {
+    if ! grep -q devices /proc/cgroups 2>/dev/null; then
+        echo "ERROR: Cgroup 'devices' controller is not available!"
+        echo "LXC requires the devices cgroup controller to function properly."
+        echo "This kernel does not support the required cgroup features."
+        echo ""
+        echo "Installation aborted."
+        return 1
+    fi
+    return 0
+}
+
 # Detect root method
 detect_root() {
     if command -v magisk >/dev/null 2>&1; then
@@ -37,7 +50,7 @@ detect_root() {
 # Extract core LXC management files
 setup_rootfs() {
     mkdir -p "$MODPATH/system/bin"
-    unzip -oj "$ZIPFILE" 'system/bin/lxcmgr' -d "$MODPATH/system/bin" >&2
+    unzip -oj "$ZIPFILE" 'system/bin/*' -d "$MODPATH/system/bin" >&2
     echo "- LXC management files extracted"
 }
 

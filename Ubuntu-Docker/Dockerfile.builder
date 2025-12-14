@@ -188,6 +188,47 @@ DNS=8.8.8.8 8.8.4.4
 FallbackDNS=1.1.1.1
 EOF
 
+# --- START: ANDROID HARDWARE PROTECTION & UDEV FIXES ---
+# 1. Mask the dangerous standard trigger (Prevents coldplugging Android hardware)
+RUN ln -sf /dev/null /etc/systemd/system/systemd-udev-trigger.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-udev-settle.service
+
+# 2. Apply rules to ignore sensitive Android subsystems (Video, Modem, Binder)
+RUN mkdir -p /etc/udev/rules.d && \
+    cat > /etc/udev/rules.d/99-android-hardware-protection.rules << 'EOF'
+SUBSYSTEM=="vcodec", OPTIONS+="ignore_device"
+SUBSYSTEM=="video4linux", OPTIONS+="ignore_device"
+SUBSYSTEM=="ccci", OPTIONS+="ignore_device"
+SUBSYSTEM=="mtk-*", OPTIONS+="ignore_device"
+SUBSYSTEM=="binder", OPTIONS+="ignore_device"
+SUBSYSTEM=="ashmem", OPTIONS+="ignore_device"
+EOF
+
+# 3. Create a SAFE Trigger service (Only triggers USB, Input, Block devices)
+RUN cat > /etc/systemd/system/safe-udev-trigger.service << 'EOF'
+[Unit]
+Description=Safe Udev Trigger for Android
+After=systemd-udevd-kernel.socket systemd-udevd-control.socket
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/udevadm trigger --subsystem-match=usb --subsystem-match=block --subsystem-match=input --subsystem-match=tty
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 4. Enable the safe trigger and ensure the main daemon is unmasked
+RUN rm -f /etc/systemd/system/systemd-udevd.service && \
+    mkdir -p /etc/systemd/system/multi-user.target.wants && \
+    ln -sf /etc/systemd/system/safe-udev-trigger.service /etc/systemd/system/multi-user.target.wants/safe-udev-trigger.service
+
+# 5. Fix PAM to prevent issues with keyinit on older Android kernels
+RUN find /etc/pam.d/ -type f -exec sed -i -E 's/^(session\s+(optional|required)\s+pam_keyinit\.so)/#\1/' {} +
+# --- END: ANDROID HARDWARE PROTECTION ---
+
 # Purge and reinstall qemu and binfmt in the exact order specified
 RUN apt-get purge -y qemu-* binfmt-support && \
     apt-get autoremove -y && \

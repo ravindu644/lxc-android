@@ -124,8 +124,8 @@ run_in_ns() {
 
 run_in_rootfs() {
     local command="$*"
-    local path_export="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'"
-    _execute_in_ns chroot "$ROOTFS_PATH" /bin/bash -c "$path_export; $command"
+    local clean_env="/usr/bin/env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' TERM=xterm"
+    _execute_in_ns chroot "$ROOTFS_PATH" /bin/sh -c "$clean_env sh -c '. /etc/profile 2>/dev/null || true; $command'"
 }
 
 create_namespace() {
@@ -201,10 +201,10 @@ apply_internet_fix() {
     [ -n "$d1" ] && dns_servers="nameserver $d1"
     [ -n "$d2" ] && dns_servers="$dns_servers\nnameserver $d2"
 
-    run_in_rootfs "echo '$C_HOSTNAME' > /etc/hostname"
-    run_in_rootfs "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts"
-    run_in_rootfs hostname "$C_HOSTNAME"
-    run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf"
+    run_in_rootfs "echo '$C_HOSTNAME' > /etc/hostname" >/dev/null 2>&1
+    run_in_rootfs "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts" >/dev/null 2>&1
+    run_in_rootfs hostname "$C_HOSTNAME" >/dev/null 2>&1
+    run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf" >/dev/null 2>&1
 
     # 1.5. Enable IPv4 forwarding and disable IPv6
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1

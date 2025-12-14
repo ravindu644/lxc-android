@@ -29,7 +29,7 @@ done
 
 # --- Logging ---
 log() { [ "$SILENT" -eq 0 ] && echo "[INFO] $1"; }
-warn() { [ "$SILENT" -eq 0 ] && echo "[WARN] $1"; }
+warn() { echo "[WARN] $1"; }
 error() { echo "[ERROR] $1"; }
 
 # --- Android Optimization ---
@@ -612,6 +612,15 @@ case "$1" in
     run)
         shift
         [ -z "$1" ] && { error "Command required."; exit 1; }
+
+        # Check if rootfs is running, start silently if not
+        if ! check_rootfs_status; then
+            echo "Bootstrapping rootfs..."
+            SILENT=1
+            start_rootfs
+            SILENT=0
+        fi
+
         run_in_rootfs "$*"
         ;;
     backup)

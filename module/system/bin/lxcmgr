@@ -50,6 +50,36 @@ android_optimizations() {
 
 # --- Namespace Handling ---
 
+check_rootfs_status() {
+    local holder_pid
+
+    # Check if PID file exists
+    [ ! -f "$HOLDER_PID_FILE" ] && return 1
+
+    # Read PID from file
+    holder_pid=$(cat "$HOLDER_PID_FILE" 2>/dev/null)
+    [ -z "$holder_pid" ] && return 1
+
+    # Check if PID is valid and process is running
+    kill -0 "$holder_pid" 2>/dev/null || return 1
+
+    # Verify the process is actually the namespace holder (busybox sleep infinity)
+    # Check /proc/PID/cmdline to ensure it matches our expected process
+    local cmdline
+    cmdline=$(cat "/proc/$holder_pid/cmdline" 2>/dev/null | tr '\0' ' ')
+
+    # The namespace holder should be "busybox sleep infinity" or contain "sleep"
+    case "$cmdline" in
+        *sleep*)
+            # Additional verification: check if namespace files exist
+            # This ensures the process is actually in a namespace
+            [ -e "/proc/$holder_pid/ns/mnt" ] && return 0
+            ;;
+    esac
+
+    return 1
+}
+
 _get_ns_flags() {
     local flags_file="$HOLDER_PID_FILE.flags"
     if [ -f "$flags_file" ]; then
@@ -72,7 +102,7 @@ _get_ns_flags() {
 
 _execute_in_ns() {
     local holder_pid
-    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+    if check_rootfs_status; then
         holder_pid=$(cat "$HOLDER_PID_FILE")
         busybox nsenter --target "$holder_pid" $(_get_ns_flags) -- "$@"
     else
@@ -84,7 +114,7 @@ _execute_in_ns() {
 run_in_ns() {
     # Wrapper to execute a command in the namespace but not yet in the rootfs.
     # Falls back to direct execution if namespace not available.
-    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+    if check_rootfs_status; then
         _execute_in_ns "$@"
     else
         # If no namespace holder is running, execute command directly.
@@ -208,7 +238,7 @@ apply_internet_fix() {
 }
 
 start_rootfs() {
-    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+    if check_rootfs_status; then
         log "Rootfs already running."
         return
     fi
@@ -390,7 +420,7 @@ enter_rootfs() {
     local user="${1:-root}"
 
     # Check for running Namespace
-    if [ ! -f "$HOLDER_PID_FILE" ] || ! kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+    if ! check_rootfs_status; then
         error "Rootfs is not running. Use '$SCRIPT_NAME start' first."
         exit 1
     fi
@@ -417,7 +447,7 @@ backup_rootfs() {
     log "Backing up to $backup_file..."
     
     # Stop rootfs if running
-    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+    if check_rootfs_status; then
         stop_rootfs
     fi
 
@@ -491,7 +521,7 @@ restore_rootfs() {
     log "Restoring from $backup_file..."
 
     # Stop rootfs if running
-    if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+    if check_rootfs_status; then
         stop_rootfs
     fi
 
@@ -570,7 +600,7 @@ case "$1" in
         fi
         ;;
     status)
-        if [ -f "$HOLDER_PID_FILE" ] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; then
+        if check_rootfs_status; then
             echo "Status: RUNNING (PID: $(cat "$HOLDER_PID_FILE"))"
         else
             echo "Status: STOPPED"

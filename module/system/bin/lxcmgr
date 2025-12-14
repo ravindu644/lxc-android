@@ -8,7 +8,6 @@ BASE_ROOTFS_DIR="${BASE_ROOTFS_DIR:-/data/local/alpine-rootfs}"
 ROOTFS_PATH="${BASE_ROOTFS_DIR}/rootfs"
 ROOTFS_IMG="${BASE_ROOTFS_DIR}/rootfs.img"
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_DIR="$(dirname "$0")"
 C_HOSTNAME="alpine"
 MOUNTED_FILE="${BASE_ROOTFS_DIR}/mount.points"
 HOLDER_PID_FILE="${BASE_ROOTFS_DIR}/holder.pid"
@@ -26,6 +25,37 @@ for cmd in busybox unshare; do
         exit 1
     fi
 done
+
+# --- Requirements Check ---
+check_requirements() {
+    local missing_requirements=0
+
+    # MUST: Check devtmpfs support
+    if ! grep -q devtmpfs /proc/filesystems 2>/dev/null; then
+        error "devtmpfs is not supported by the kernel"
+        error "This is a REQUIRED feature - cannot proceed"
+        missing_requirements=$((missing_requirements + 1))
+    fi
+
+    # MUST: Check cgroup devices controller support
+    if ! grep -q devices /proc/cgroups 2>/dev/null; then
+        error "cgroup devices controller is not available"
+        error "This is a REQUIRED feature for LXC - cannot proceed"
+        missing_requirements=$((missing_requirements + 1))
+    fi
+
+    # MUST: Check PID namespace support
+    if ! unshare --pid true 2>/dev/null; then
+        error "PID namespace is not supported by the kernel"
+        error "This is a REQUIRED feature for isolation - cannot proceed"
+        missing_requirements=$((missing_requirements + 1))
+    fi
+
+    if [ $missing_requirements -gt 0 ]; then
+        error "Missing $missing_requirements required feature(s) - cannot proceed"
+        exit 1
+    fi
+}
 
 # --- Logging ---
 log() { [ "$SILENT" -eq 0 ] && echo "[INFO] $1"; }
@@ -49,7 +79,6 @@ android_optimizations() {
 }
 
 # --- Namespace Handling ---
-
 check_rootfs_status() {
     local holder_pid
 
@@ -65,19 +94,7 @@ check_rootfs_status() {
 
     # Verify the process is actually the namespace holder (busybox sleep infinity)
     # Check /proc/PID/cmdline to ensure it matches our expected process
-    local cmdline
-    cmdline=$(cat "/proc/$holder_pid/cmdline" 2>/dev/null | tr '\0' ' ')
-
-    # The namespace holder should be "busybox sleep infinity" or contain "sleep"
-    case "$cmdline" in
-        *sleep*)
-            # Additional verification: check if namespace files exist
-            # This ensures the process is actually in a namespace
-            [ -e "/proc/$holder_pid/ns/mnt" ] && return 0
-            ;;
-    esac
-
-    return 1
+    [ -e "/proc/$holder_pid/ns/mnt" ] && grep -q sleep "/proc/$holder_pid/cmdline" 2>/dev/null
 }
 
 _get_ns_flags() {
@@ -124,16 +141,24 @@ run_in_ns() {
 
 run_in_rootfs() {
     local command="$*"
+    local env_vars="PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' TERM=xterm"
+    _execute_in_ns /bin/bash -c ". /etc/profile 2>/dev/null || true; $command"
+}
+
+run_command_in_rootfs() {
+    local command="$*"
     local clean_env="/usr/bin/env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' TERM=xterm"
-    _execute_in_ns chroot "$ROOTFS_PATH" /bin/sh -c "$clean_env sh -c '. /etc/profile 2>/dev/null || true; $command'"
+
+    # After pivot_root, / inside the namespace IS the rootfs, so no chroot needed
+    _execute_in_ns /bin/bash -c "$clean_env bash -c '. /etc/profile 2>/dev/null || true; $command'"
 }
 
 create_namespace() {
     local pid_file="$1"
     local unshare_flags=""
-    
+
     # Check supported namespaces
-    for ns_flag in --pid --mount --uts --ipc; do
+    for ns_flag in --mount --uts --ipc --pid; do
         if unshare "$ns_flag" true 2>/dev/null; then
             unshare_flags+=" $ns_flag"
         fi
@@ -142,6 +167,13 @@ create_namespace() {
     # strict check: must have mount namespace
     if ! echo "$unshare_flags" | grep -q -- "--mount"; then
         error "Kernel does not support Mount Namespace. Cannot proceed."
+        return 1
+    fi
+
+    # strict check: must have PID namespace (required for pivot_root)
+    if ! echo "$unshare_flags" | grep -q -- "--pid"; then
+        error "Kernel does not support PID Namespace. Cannot proceed."
+        error "PID namespace is required for pivot_root functionality."
         return 1
     fi
 
@@ -168,50 +200,106 @@ create_namespace() {
 
 # --- Setup Functions ---
 
-advanced_mount() {
+pivot_rootfs() {
+    # This function performs pivot_root inside the namespace to make rootfs the actual root
+    # After pivot_root, / inside the namespace IS the rootfs, so we don't need chroot anymore
+
+    holder_pid=$(cat "$HOLDER_PID_FILE")
+
+    # Create a temporary directory inside rootfs for the old root
+    local old_root_dir="$ROOTFS_PATH/.pivotroot_old"
+    if ! _execute_in_ns mkdir -p "$old_root_dir"; then
+        error "Failed to create pivot root temporary directory"
+        return 1
+    fi
+
+    # Bind mount the rootfs to itself (required for pivot_root)
+    # pivot_root requires the new root to be a mount point
+    # Skip if already a mount point (e.g., when using sparse image method)
+    if ! _execute_in_ns mountpoint -q "$ROOTFS_PATH" 2>/dev/null; then
+        if ! _execute_in_ns mount --bind "$ROOTFS_PATH" "$ROOTFS_PATH"; then
+            error "Failed to bind mount rootfs to itself (required for pivot_root)"
+            _execute_in_ns rmdir "$old_root_dir" 2>/dev/null
+            return 1
+        fi
+    fi
+
+    # Perform pivot_root inside the namespace
+    # This must be done from within the namespace
+    # Try pivot_root with busybox
+    if ! _execute_in_ns busybox sh -c "cd '$ROOTFS_PATH' && busybox pivot_root . '$old_root_dir' 2>&1" 2>/dev/null; then
+        # Cleanup on failure
+        _execute_in_ns umount "$ROOTFS_PATH" 2>/dev/null || true
+        _execute_in_ns rmdir "$old_root_dir" 2>/dev/null || true
+        error "pivot_root failed"
+        error "This may be due to:"
+        error "  1. pivot_root command not available on this system"
+        error "  2. Rootfs and Android root on same filesystem (pivot_root requirement)"
+        error "  3. Insufficient permissions"
+        return 1
+    fi
+
+    # Cleanup old root - use rootfs's tools after pivot
+    # The old root is now at /.pivotroot_old relative to the new root
+    # Try to unmount old root (lazy unmount to avoid busy errors)
+    _execute_in_ns /bin/umount -l /.pivotroot_old 2>/dev/null || \
+    _execute_in_ns /bin/umount /.pivotroot_old 2>/dev/null || true
+
+    # Try to remove old root directory
+    _execute_in_ns /bin/rmdir /.pivotroot_old 2>/dev/null || true
+
+    return 0
+}
+
+# Mount function - after pivot_root, mounts directly at /proc, /sys, etc. using rootfs's /bin/mount
+mount_in_rootfs() {
     local src="$1" tgt="$2" type="$3" opts="$4"
     local mount_exit=0
-    [ ! -d "$tgt" ] && _execute_in_ns mkdir -p "$tgt" 2>/dev/null
-    
+    local mount_tgt="$tgt"
+
+    # After pivot_root, / inside the namespace IS the rootfs, so mount directly at /* (tgt is already absolute)
+    _execute_in_ns /bin/mkdir -p "$mount_tgt" 2>/dev/null || true
+
     if [ "$type" = "bind" ]; then
-        _execute_in_ns mount --bind "$src" "$tgt"
+        _execute_in_ns /bin/mount --bind "$src" "$mount_tgt" 2>/dev/null
         mount_exit=$?
     else
-        _execute_in_ns mount -t "$type" $opts "$type" "$tgt"
+        if [ -n "$opts" ]; then
+            _execute_in_ns /bin/mount -t "$type" -o "$opts" "$src" "$mount_tgt" 2>/dev/null
+        else
+            _execute_in_ns /bin/mount -t "$type" "$src" "$mount_tgt" 2>/dev/null
+        fi
         mount_exit=$?
     fi
 
     if [ $mount_exit -eq 0 ]; then
-        echo "$tgt" >> "$MOUNTED_FILE"
+        # Write mount point to file for tracking
+        echo "$mount_tgt" >> "$MOUNTED_FILE"
+        return 0
     else
-        warn "Failed to mount $tgt"
+        warn "Failed to mount $mount_tgt"
+        return 1
     fi
-
-    return $mount_exit
 }
 
-apply_internet_fix() {
-    log "Applying networking fixes..."
-    
-    # 1. Resolver
+# Networking fixes that run on the host
+networking_host() {
+    log "Configuring networking..."
+
+    # Get DNS servers from Android props
     local dns_servers="nameserver 8.8.8.8\nnameserver 8.8.4.4"
-    # Try to grab android props
     local d1=$(getprop net.dns1 2>/dev/null)
     local d2=$(getprop net.dns2 2>/dev/null)
     [ -n "$d1" ] && dns_servers="nameserver $d1"
     [ -n "$d2" ] && dns_servers="$dns_servers\nnameserver $d2"
+    export DNS_SERVERS="$dns_servers"
 
-    run_in_rootfs "echo '$C_HOSTNAME' > /etc/hostname" >/dev/null 2>&1
-    run_in_rootfs "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts" >/dev/null 2>&1
-    run_in_rootfs hostname "$C_HOSTNAME" >/dev/null 2>&1
-    run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf" >/dev/null 2>&1
-
-    # 1.5. Enable IPv4 forwarding and disable IPv6
+    # Enable IPv4 forwarding and disable IPv6
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
     sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1
     sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1
 
-    # 1.6. Detect default gateway & interface
+    # Detect default gateway & interface
     # Fixes tailscale issues
     DEFAULT_IFACE=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
     DEFAULT_GW=$(ip route get 8.8.8.8 | awk '/via/ {for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
@@ -220,14 +308,7 @@ apply_internet_fix() {
         log "Added default route via $DEFAULT_GW on $DEFAULT_IFACE"
     fi
 
-    # 2. Android GIDs (Permissions)
-    run_in_rootfs "grep -q '^aid_inet:' /etc/group || echo 'aid_inet:x:3003:root' >> /etc/group"
-    run_in_rootfs "grep -q '^aid_net_raw:' /etc/group || echo 'aid_net_raw:x:3004:root' >> /etc/group"
-
-    # 3. Fix root groups if usermod exists, otherwise we rely on manual /etc/group editing above
-    run_in_rootfs "command -v usermod >/dev/null && usermod -a -G aid_inet,aid_net_raw root 2>/dev/null || true"
-
-    # 4. Flush filter chains and forward all the LXC traffic to localhost
+    # Flush filter chains and forward all the LXC traffic to localhost
     run_in_ns iptables -t filter -F
     run_in_ns ip6tables -t filter -F
 
@@ -237,11 +318,31 @@ apply_internet_fix() {
     run_in_ns iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 -m udp --dport 1:65535 -j REDIRECT --to-ports 1-65535 || true
 }
 
+# Networking fixes that run inside the rootfs
+networking_rootfs() {
+    # Set hostname and hosts file
+    run_in_rootfs "echo '$C_HOSTNAME' > /etc/hostname" >/dev/null 2>&1
+    run_in_rootfs "echo '127.0.0.1 localhost $C_HOSTNAME' > /etc/hosts" >/dev/null 2>&1
+    run_in_rootfs hostname "$C_HOSTNAME" >/dev/null 2>&1
+
+    # Set DNS servers (from networking_host)
+    local dns_servers="${DNS_SERVERS:-nameserver 8.8.8.8\nnameserver 8.8.4.4}"
+    run_in_rootfs "echo -e '$dns_servers' > /etc/resolv.conf" >/dev/null 2>&1
+
+    # Android GIDs (Paranoid Networking in older kernels)
+    run_in_rootfs "grep -q '^aid_inet:' /etc/group || echo 'aid_inet:x:3003:root' >> /etc/group"
+    run_in_rootfs "grep -q '^aid_net_raw:' /etc/group || echo 'aid_net_raw:x:3004:root' >> /etc/group"
+    run_in_rootfs "command -v usermod >/dev/null && usermod -a -G aid_inet,aid_net_raw root 2>/dev/null || true"
+}
+
 start_rootfs() {
     if check_rootfs_status; then
         log "Rootfs already running."
         return
     fi
+
+    # Check system requirements first
+    check_requirements
 
     log "Starting Alpine Rootfs..."
     setenforce 0 2>/dev/null
@@ -263,13 +364,6 @@ start_rootfs() {
             fi
         fi
 
-        # Enable journal if missing
-        if ! tune2fs -l "$ROOTFS_IMG" 2>/dev/null | grep -q "has_journal"; then
-            log "Sparse image does not have journal - Enabling..."
-            tune2fs -O has_journal "$ROOTFS_IMG" 2>/dev/null || warn "Failed to enable journal"
-            tune2fs -o journal_data_writeback "$ROOTFS_IMG" 2>/dev/null || warn "Failed to set journal mode"
-        fi
-
         # Check and repair filesystem before mounting
         log "Checking filesystem integrity..."
         local fsck_output=$(e2fsck -f -y "$ROOTFS_IMG" 2>&1)
@@ -287,84 +381,70 @@ start_rootfs() {
             log "Filesystem integrity verified"
         fi
 
-        sleep 1
+        sync ; sleep 0.25
 
         log "Mounting sparse image to rootfs..."
         if ! _execute_in_ns mount -t ext4 -o loop,rw,noatime,nodiratime,errors=remount-ro "$ROOTFS_IMG" "$ROOTFS_PATH"; then
             error "Failed to mount sparse image"
             exit 1
-        else
-            log "Sparse image mounted successfully"
         fi
     else
         # Directory-based rootfs - check if directory exists
         [ ! -d "$ROOTFS_PATH" ] && { error "Directory $ROOTFS_PATH not found"; exit 1; }
     fi
 
-    # 2. Prepare Mounts
-    rm -f "$MOUNTED_FILE"
+    # 2. Set mount propagation to rprivate (before pivot_root)
+    _execute_in_ns busybox mount --make-rprivate / 2>/dev/null || warn "Failed to set root to rprivate propagation"
 
-    # Set mount propagation to rprivate
-    if _execute_in_ns busybox mount --make-rprivate / 2>/dev/null; then
-        log "Set entire namespace to recursive private propagation"
-    else
-        warn "Failed to set root to rprivate propagation"
+    # 2.5. Apply networking fixes (host) BEFORE pivot_root
+    networking_host
+
+    # 2.6. Apply Android optimizations BEFORE pivot_root
+    android_optimizations --enable
+
+    # 3. Pivot root to make rootfs the actual root filesystem
+    # MUST be done before mounting filesystems, as mounts will be at /proc, /sys, etc. after pivot
+    # pivot_root is required - if it fails, we cannot continue
+    if ! pivot_rootfs; then
+        error "Failed to pivot root filesystem - cannot continue"
+        exit 1
     fi
 
-    # Standard Linux Mounts
-    advanced_mount "proc" "$ROOTFS_PATH/proc" "proc" "-o rw,nosuid,nodev,noexec,relatime"
-    advanced_mount "sysfs" "$ROOTFS_PATH/sys" "sysfs" "-o rw,nosuid,nodev,noexec,relatime"
+    # 4. Mount all filesystems
+    # After pivot_root, mount at /proc, /sys, etc. using rootfs's /bin/mount
+    log "Mounting essential filesystems..."
+    rm -f "$MOUNTED_FILE"
+
+    # Mount proc
+    mount_in_rootfs "proc" "/proc" "proc" "rw,nosuid,nodev,noexec,relatime"
+
+    # Mount sysfs
+    mount_in_rootfs "sysfs" "/sys" "sysfs" "rw,nosuid,nodev,noexec,relatime"
+
+    # Mount devtmpfs
+    mount_in_rootfs "devtmpfs" "/dev" "devtmpfs" "mode=755"
+    run_in_rootfs "umount /dev/fd 2>/dev/null || true && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
+
+    # Mount tmpfs for /run, /tmp, and /dev/shm
+    mount_in_rootfs "tmpfs" "/run" "tmpfs" "rw,nosuid,nodev,relatime,size=64M"
+    mount_in_rootfs "tmpfs" "/tmp" "tmpfs" "rw,nosuid,nodev,relatime,size=256M"
+    mount_in_rootfs "tmpfs" "/dev/shm" "tmpfs" "mode=1777"
+
+    # Mount devpts
+    mount_in_rootfs "devpts" "/dev/pts" "devpts" "rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000"
+
+    # Mount binfmt_misc if supported
+    mount_in_rootfs "binfmt_misc" "/proc/sys/fs/binfmt_misc" "binfmt_misc" "" 2>/dev/null || true
 
     # Essential for LXC functionality
     log "Setting up cgroups for LXC..."
+    mount_in_rootfs "tmpfs" "/sys/fs/cgroup" "tmpfs" "mode=755,rw,nosuid,nodev,noexec,relatime"
+    mount_in_rootfs "cgroup" "/sys/fs/cgroup/devices" "cgroup" "devices"
+    mount_in_rootfs "cgroup" "/sys/fs/cgroup/systemd" "cgroup" "none,name=systemd" || warn "Failed to mount cgroup systemd"
 
-    _execute_in_ns mkdir -p "$ROOTFS_PATH/sys/fs/cgroup"
-
-    if _execute_in_ns mount -t tmpfs -o mode=755,rw,nosuid,nodev,noexec,relatime tmpfs "$ROOTFS_PATH/sys/fs/cgroup" 2>/dev/null; then
-        echo "$ROOTFS_PATH/sys/fs/cgroup" >> "$MOUNTED_FILE"
-
-        # Mount 'devices' cgroup (Critical for LXC)
-        _execute_in_ns mkdir -p "$ROOTFS_PATH/sys/fs/cgroup/devices"
-        if grep -q devices /proc/cgroups 2>/dev/null; then
-            if _execute_in_ns mount -t cgroup -o devices cgroup "$ROOTFS_PATH/sys/fs/cgroup/devices" 2>/dev/null; then
-                log "Cgroup devices mounted successfully."
-                echo "$ROOTFS_PATH/sys/fs/cgroup/devices" >> "$MOUNTED_FILE"
-            else
-                warn "Failed to mount cgroup devices."
-            fi
-        else
-            warn "Devices cgroup controller not available."
-        fi
-
-        # Mount 'systemd' cgroup
-        if ! advanced_mount "cgroup" "$ROOTFS_PATH/sys/fs/cgroup/systemd" "cgroup" "-o none,name=systemd"; then
-            warn "Failed to mount cgroup systemd."
-        fi
-    else
-        warn "Failed to mount cgroup tmpfs."
-    fi
-
-    # Dev Mounts
-    if grep -q devtmpfs /proc/filesystems; then
-        advanced_mount "devtmpfs" "$ROOTFS_PATH/dev" "devtmpfs" "-o mode=755"
-        run_in_rootfs "umount /dev/fd 2>/dev/null || true && rm -rf /dev/fd && ln -sf /proc/self/fd /dev/ 2>/dev/null || true"
-    else
-        advanced_mount "/dev" "$ROOTFS_PATH/dev" "bind"
-    fi
-
-    # Mount binfmt_misc if supported
-    if grep -q binfmt_misc /proc/filesystems; then
-        advanced_mount "binfmt_misc" "$ROOTFS_PATH/proc/sys/fs/binfmt_misc" "binfmt_misc" ""
-    fi
-
-    advanced_mount "devpts" "$ROOTFS_PATH/dev/pts" "devpts" "-o rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000"
-    advanced_mount "tmpfs" "$ROOTFS_PATH/tmp" "tmpfs" "-o rw,nosuid,nodev,relatime,size=256M"
-    advanced_mount "tmpfs" "$ROOTFS_PATH/run" "tmpfs" "-o rw,nosuid,nodev,relatime,size=64M"
-    advanced_mount "tmpfs" "$ROOTFS_PATH/dev/shm" "tmpfs" "-o mode=1777"
-
-    # 3. Optimizations & Fixes
-    apply_internet_fix
-    android_optimizations --enable
+    # 5. Apply networking fixes (rootfs) AFTER pivot_root and mounting
+    # Now that pivot_root is done and filesystems are mounted, we can edit rootfs files
+    networking_rootfs
 
     log "Rootfs started successfully."
 }
@@ -372,45 +452,84 @@ start_rootfs() {
 umount_rootfs() {
     log "Unmounting rootfs filesystems..."
 
-    # Unmount mounts recorded in file
-    if [ -f "$MOUNTED_FILE" ]; then
-        # Unmount in reverse order (deepest first)
-        sort -r "$MOUNTED_FILE" | while read -r mount_point; do
-            case "$mount_point" in
-                "$ROOTFS_PATH"/sys*) run_in_ns umount -l "$mount_point" 2>/dev/null ;;
-                *) run_in_ns umount "$mount_point" 2>/dev/null ;;
-            esac
-        done
-        rm -f "$MOUNTED_FILE"
-        log "All rootfs mounts unmounted."
+    if [ ! -f "$MOUNTED_FILE" ]; then
+        log "No mount points file found, skipping unmount."
+        return 0
     fi
+
+    # Check if namespace is still running
+    if ! check_rootfs_status; then
+        warn "Namespace not running, cannot unmount filesystems properly."
+        rm -f "$MOUNTED_FILE"
+        return 0
+    fi
+
+    local mount_point
+    local temp_file="${MOUNTED_FILE}.sorted"
+
+    # Sort mount points in reverse order (deepest first) to a temp file
+    # This ensures child mounts are unmounted before parent mounts
+    sort -r "$MOUNTED_FILE" > "$temp_file" 2>/dev/null || {
+        warn "Failed to sort mount points file"
+        rm -f "$MOUNTED_FILE"
+        return 1
+    }
+
+    # Read from sorted file and unmount each mount point
+    # After pivot_root, all mounts are at /proc, /sys, etc. - use rootfs's /bin/umount
+    while IFS= read -r mount_point || [ -n "$mount_point" ]; do
+        # Skip empty lines and comments
+        [ -z "$mount_point" ] && continue
+        [ "${mount_point#\#}" != "$mount_point" ] && continue
+
+        # Use rootfs's /bin/umount for all mounts (after pivot_root)
+        case "$mount_point" in
+            /sys*)
+                _execute_in_ns /bin/umount -l "$mount_point" 2>/dev/null || \
+                _execute_in_ns /bin/umount "$mount_point" 2>/dev/null || true
+                ;;
+            *)
+                _execute_in_ns /bin/umount "$mount_point" 2>/dev/null || \
+                _execute_in_ns /bin/umount -l "$mount_point" 2>/dev/null || true
+                ;;
+        esac
+    done < "$temp_file"
+
+    # Clean up files
+    rm -f "$temp_file" "$MOUNTED_FILE"
+    log "All rootfs mounts unmounted."
 }
 
 stop_rootfs() {
     log "Stopping rootfs..."
-    
-    # Kill processes inside rootfs path
-    local pids=$(lsof 2>/dev/null | grep "$ROOTFS_PATH" | awk '{print $2}' | uniq)
-    [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 
-    # Unmount filesystems (BEFORE killing namespace holder)
+    local holder_pid=""
+    if [ -f "$HOLDER_PID_FILE" ]; then
+        holder_pid=$(cat "$HOLDER_PID_FILE" 2>/dev/null)
+    fi
+
+    # First, unmount filesystems while namespace is still alive
     umount_rootfs
 
-    # Unmount sparse image if it exists
-    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$ROOTFS_PATH" 2>/dev/null; then
-        log "Unmounting sparse image..."
-        if umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null; then
-            log "Sparse image unmounted successfully."
-        else
-            warn "Failed to unmount sparse image."
-        fi
+    # Now the magic part: Just kill the namespace holder (PID 1 in the namespace)
+    # The kernel will automatically kill ALL processes in the namespace
+    if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
+        log "Terminating namespace (PID: $holder_pid)..."
+
+        # Send SIGKILL to the holder - this kills the entire namespace instantly
+        kill -9 "$holder_pid" 2>/dev/null
+
+        # Brief wait for kernel cleanup
+        sleep 0.2
     fi
 
-    # Kill Namespace Holder
-    if [ -f "$HOLDER_PID_FILE" ]; then
-        kill "$(cat "$HOLDER_PID_FILE")" 2>/dev/null
-        rm -f "$HOLDER_PID_FILE" "$HOLDER_PID_FILE.flags"
-    fi
+    # Clean up PID file and related files
+    [ -f "$HOLDER_PID_FILE" ] && rm -f "$HOLDER_PID_FILE" "$HOLDER_PID_FILE.flags"
+
+    # Finally, Unmount sparse image if mounted
+    [ -f "$ROOTFS_IMG" ] && mountpoint -q "$ROOTFS_PATH" 2>/dev/null && {
+        umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null && log "Sparse image unmounted" || warn "Failed to unmount sparse image"
+    }
 
     android_optimizations --disable
     log "Stopped."
@@ -432,208 +551,72 @@ enter_rootfs() {
     fi
 
     log "Entering shell as $user..."
-    
-    # Use bash since it's installed in the rootfs
+
     local common_exports="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' ; export TERM=xterm"
     local shell_cmd="$common_exports; exec /bin/su - $user"
-    
-    _execute_in_ns chroot "$ROOTFS_PATH" /bin/bash -c "$shell_cmd"
+
+    # After pivot_root, / inside the namespace IS the rootfs, so no chroot needed
+    _execute_in_ns /bin/bash -c "$shell_cmd"
 }
 
 backup_rootfs() {
     local backup_file="$1"
     [ -z "$backup_file" ] && { error "Usage: backup <path.tar.gz>"; exit 1; }
-    
     log "Backing up to $backup_file..."
-    
-    # Stop rootfs if running
-    if check_rootfs_status; then
-        stop_rootfs
-    fi
-
+    check_rootfs_status && stop_rootfs
     sync && sleep 1
-
-    local backup_dir=$(dirname "$backup_file")
-    mkdir -p "$backup_dir"
-    
-    local tar_exit_code=1
+    mkdir -p "$(dirname "$backup_file")"
 
     if [ -f "$ROOTFS_IMG" ]; then
-        # Sparse image backup method
-        log "Using sparse image backup method."
-
-        local temp_mount_point="${ROOTFS_PATH}_bkmnt"
-        mkdir -p "$temp_mount_point"
-
-        # Check and repair filesystem before mounting
-        log "Checking filesystem integrity before backup..."
-        local fsck_output=$(e2fsck -f -y "$ROOTFS_IMG" 2>&1)
-        local fsck_exit=$?
-
-        if [ $fsck_exit -ge 4 ]; then
-            error "Filesystem check failed (exit: $fsck_exit)"
-            error "Output: $fsck_output"
-            error "Filesystem corruption detected - cannot safely backup"
-            rmdir "$temp_mount_point" >/dev/null 2>&1
-            exit 1
-        fi
-
-        [ $fsck_exit -ne 0 ] && log "Filesystem check corrected issues (exit: $fsck_exit)"
+        local temp_mount="${ROOTFS_PATH}_bkmnt"
+        mkdir -p "$temp_mount"
+        local fsck_exit=$(e2fsck -f -y "$ROOTFS_IMG" 2>&1 | tail -1; echo ${PIPESTATUS[0]})
+        [ "$fsck_exit" -ge 4 ] && { error "Filesystem check failed"; rmdir "$temp_mount" 2>/dev/null; exit 1; }
+        [ "$fsck_exit" -ne 0 ] && log "Filesystem check corrected issues"
         sleep 1
-
-        # Mount the image read-only for safety
-        if mount -t ext4 -o loop,ro "$ROOTFS_IMG" "$temp_mount_point"; then
-            log "Sparse image mounted cleanly for backup."
-
-            if busybox tar -czf "$backup_file" -C "$temp_mount_point" .; then
-                tar_exit_code=0
-            fi
-
-            sync
-            umount "$temp_mount_point"
-            rmdir "$temp_mount_point"
-        else
-            error "Failed to create a clean mount of the sparse image for backup."
-            rmdir "$temp_mount_point" >/dev/null 2>&1
-        fi
+        mount -t ext4 -o loop,ro "$ROOTFS_IMG" "$temp_mount" && {
+            busybox tar -czf "$backup_file" -C "$temp_mount" . && log "Backup complete: $backup_file ($(du -h "$backup_file" 2>/dev/null | cut -f1))" || error "Backup failed"
+            sync && umount "$temp_mount" && rmdir "$temp_mount"
+        } || { error "Failed to mount image"; rmdir "$temp_mount" 2>/dev/null; exit 1; }
     else
-        # Directory backup method
-        log "Using directory backup method."
-        if busybox tar -czf "$backup_file" -C "$ROOTFS_PATH" .; then
-            tar_exit_code=0
-        fi
-    fi
-
-    if [ "$tar_exit_code" -eq 0 ]; then
-        local size=$(du -h "$backup_file" 2>/dev/null | cut -f1)
-        log "Backup complete: $backup_file (${size:-unknown size})"
-    else
-        error "Backup failed. Removing incomplete file."
-        rm -f "$backup_file"
-        exit 1
+        busybox tar -czf "$backup_file" -C "$ROOTFS_PATH" . && log "Backup complete: $backup_file ($(du -h "$backup_file" 2>/dev/null | cut -f1))" || { error "Backup failed"; exit 1; }
     fi
 }
 
 restore_rootfs() {
     local backup_file="$1"
     [ ! -f "$backup_file" ] && { error "File not found: $backup_file"; exit 1; }
-    
     log "Restoring from $backup_file..."
-
-    # Stop rootfs if running
-    if check_rootfs_status; then
-        stop_rootfs
-    fi
-
-    # Unmount sparse image if mounted
-    if [ -f "$ROOTFS_IMG" ] && mountpoint -q "$ROOTFS_PATH" 2>/dev/null; then
-        log "Unmounting sparse image..."
-        umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null || {
-            error "Failed to unmount sparse image"
-            exit 1
-        }
-    fi
-
-    # Remove sparse image if it exists (restore will create directory-based rootfs)
-    if [ -f "$ROOTFS_IMG" ]; then
-        log "Removing sparse image file..."
-        rm -f "$ROOTFS_IMG" || { error "Failed to remove sparse image file"; exit 1; }
-    fi
-
-    # Remove existing rootfs directory
-    if [ -d "$ROOTFS_PATH" ]; then
-        log "Removing existing rootfs directory..."
-        rm -rf "$ROOTFS_PATH" || { error "Failed to remove existing rootfs directory"; exit 1; }
-    fi
-
+    check_rootfs_status && stop_rootfs
+    [ -f "$ROOTFS_IMG" ] && mountpoint -q "$ROOTFS_PATH" 2>/dev/null && {
+        umount -f "$ROOTFS_PATH" 2>/dev/null || umount -l "$ROOTFS_PATH" 2>/dev/null || { error "Failed to unmount sparse image"; exit 1; }
+        rm -f "$ROOTFS_IMG" || { error "Failed to remove sparse image"; exit 1; }
+    }
+    [ -d "$ROOTFS_PATH" ] && { rm -rf "$ROOTFS_PATH" || { error "Failed to remove existing rootfs"; exit 1; }; }
     mkdir -p "$ROOTFS_PATH"
-    
-    if busybox tar -xzf "$backup_file" -C "$ROOTFS_PATH"; then
-        log "Restore complete."
-    else
-        error "Restore failed."
-        exit 1
-    fi
+    busybox tar -xzf "$backup_file" -C "$ROOTFS_PATH" && log "Restore complete." || { error "Restore failed"; exit 1; }
 }
 
 uninstall_rootfs() {
     log "Uninstalling..."
     stop_rootfs
-    
-    # Remove sparse image if it exists
-    if [ -f "$ROOTFS_IMG" ]; then
-        log "Removing sparse image file..."
-        rm -f "$ROOTFS_IMG" || { error "Failed to remove sparse image file."; exit 1; }
-        log "Sparse image removed."
-    fi
-
-    if [ -d "$ROOTFS_PATH" ]; then
-        rm -rf "$ROOTFS_PATH"
-        log "Rootfs files removed."
-    fi
-    
+    [ -f "$ROOTFS_IMG" ] && { rm -f "$ROOTFS_IMG" && log "Sparse image removed" || { error "Failed to remove sparse image"; exit 1; }; }
+    [ -d "$ROOTFS_PATH" ] && { rm -rf "$ROOTFS_PATH" && log "Rootfs files removed"; }
     rm -f "$MOUNTED_FILE" "$HOLDER_PID_FILE" "$HOLDER_PID_FILE.flags"
 }
 
 # --- CLI Handling ---
-
 case "$1" in
-    start)
-        start_rootfs
-        # Auto-enter shell if running in interactive terminal
-        if [ -t 1 ]; then
-            enter_rootfs "${2:-root}"
-        fi
-        ;;
-    stop)
-        stop_rootfs
-        ;;
-    restart)
-        log "Restarting rootfs..."
-        stop_rootfs
-        sleep 1
-        sync
-        start_rootfs
-        # Auto-enter shell if running in interactive terminal
-        if [ -t 1 ]; then
-            enter_rootfs "${2:-root}"
-        fi
-        ;;
-    status)
-        if check_rootfs_status; then
-            echo "Status: RUNNING (PID: $(cat "$HOLDER_PID_FILE"))"
-        else
-            echo "Status: STOPPED"
-        fi
-        ;;
-    enter)
-        enter_rootfs "$2"
-        ;;
-    run)
-        shift
-        [ -z "$1" ] && { error "Command required."; exit 1; }
-
-        # Check if rootfs is running, start silently if not
-        if ! check_rootfs_status; then
-            echo "Bootstrapping rootfs..."
-            SILENT=1
-            start_rootfs
-            SILENT=0
-        fi
-
-        run_in_rootfs "$*"
-        ;;
-    backup)
-        backup_rootfs "$2"
-        ;;
-    restore)
-        restore_rootfs "$2"
-        ;;
-    uninstall)
-        uninstall_rootfs
-        ;;
-    *)
-        echo "Usage: $SCRIPT_NAME {start|stop|restart|status|enter [user]|run <cmd>|backup <file>|restore <file>|uninstall}"
-        exit 1
-        ;;
+    start)   start_rootfs; [ -t 1 ] && enter_rootfs "${2:-root}" ;;
+    stop)    stop_rootfs ;;
+    restart) log "Restarting rootfs..."; stop_rootfs; sleep 1; sync; start_rootfs; [ -t 1 ] && enter_rootfs "${2:-root}" ;;
+    status)  check_rootfs_status && echo "Status: RUNNING (PID: $(cat "$HOLDER_PID_FILE"))" || echo "Status: STOPPED" ;;
+    enter)   enter_rootfs "$2" ;;
+    run)     shift; [ -z "$1" ] && { error "Command required"; exit 1; }
+             check_rootfs_status || { echo "Bootstrapping rootfs..."; SILENT=1; start_rootfs; SILENT=0; }
+             run_command_in_rootfs "$*" ;;
+    backup)  backup_rootfs "$2" ;;
+    restore) restore_rootfs "$2" ;;
+    uninstall) uninstall_rootfs ;;
+    *)       echo "Usage: $SCRIPT_NAME {start|stop|restart|status|enter [user]|run <cmd>|backup <file>|restore <file>|uninstall}"; exit 1 ;;
 esac

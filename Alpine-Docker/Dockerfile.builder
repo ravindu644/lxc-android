@@ -26,16 +26,6 @@ lxc.mount.entry = /dev/net dev/net none bind,create=dir 0 0
 lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file
 EOF
 
-# Replace lxc-attach with a warning script (unstable in Android)
-RUN mv /usr/bin/lxc-attach /usr/bin/lxc-attach.orig 2>/dev/null || true && \
-    cat > /usr/bin/lxc-attach << 'EOF' && \
-    chmod +x /usr/bin/lxc-attach
-#!/bin/sh
-echo "ERROR: lxc-attach is unstable in Android and has been disabled." >&2
-echo "Please use 'lxc-console' instead for this purpose." >&2
-exit 1
-EOF
-
 # Set custom environment variables
 RUN mkdir -p /etc/profile.d && \
     cat > /etc/profile.d/alpine-custom-env.sh << 'EOF' && \

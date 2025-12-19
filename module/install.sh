@@ -17,8 +17,16 @@ print_modname() {
 }
 
 on_install() {
-    # Check cgroup devices availability first (before touching anything)
+    # Check required kernel features first (before touching anything)
+    if ! check_devtmpfs; then
+        exit 1
+    fi
+
     if ! check_cgroup_devices; then
+        exit 1
+    fi
+
+    if ! check_pid_namespace; then
         exit 1
     fi
 

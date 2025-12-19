@@ -9,12 +9,36 @@ VERSION_FILE="$ROOTFS_DIR/version"
 
 mkdir -p "${ROOTFS_DIR}" 2>/dev/null
 
+# Check if devtmpfs is supported
+check_devtmpfs() {
+    if ! grep -q devtmpfs /proc/filesystems 2>/dev/null; then
+        echo "ERROR: devtmpfs is not supported by the kernel"
+        echo "This is a REQUIRED feature - cannot proceed"
+        echo ""
+        echo "Installation aborted."
+        return 1
+    fi
+    return 0
+}
+
 # Check if cgroup devices are available
 check_cgroup_devices() {
     if ! grep -q devices /proc/cgroups 2>/dev/null; then
         echo "ERROR: Cgroup 'devices' controller is not available!"
         echo "LXC requires the devices cgroup controller to function properly."
-        echo "This kernel does not support the required cgroup features."
+        echo "This is a REQUIRED feature for LXC - cannot proceed"
+        echo ""
+        echo "Installation aborted."
+        return 1
+    fi
+    return 0
+}
+
+# Check if PID namespace is supported
+check_pid_namespace() {
+    if ! unshare --pid true 2>/dev/null; then
+        echo "ERROR: PID namespace is not supported by the kernel"
+        echo "This is a REQUIRED feature for isolation - cannot proceed"
         echo ""
         echo "Installation aborted."
         return 1

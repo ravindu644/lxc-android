@@ -1,3 +1,2 @@
 #!/system/bin/sh
 exec /system/bin/lxcmgr run lxc-config "$@"
-
